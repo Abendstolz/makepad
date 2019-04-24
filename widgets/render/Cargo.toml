@@ -23,7 +23,7 @@ edition = "2018"
 shader_ast = {path="./shader_ast"}
 
 [dependencies.glutin]
-version = "0.20"
+version = "0.21"
 optional = true
 
 [dependencies.gl]
