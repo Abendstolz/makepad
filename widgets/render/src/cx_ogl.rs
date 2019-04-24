@@ -1,13 +1,10 @@
 use glutin::dpi::*;
-use glutin::GlContext;
+use glutin::ContextTrait;
 use glutin::GlRequest;
 use glutin::GlProfile;
 use std::mem;
 use std::ptr;
 use std::ffi::CStr;
-use std::fs::File;
-use std::io;
-use std::io::prelude::*;
 use time::precise_time_ns;
 
 use crate::cx::*;
@@ -41,9 +38,9 @@ impl Cx{
                         // update the instance buffer data
                         gl::BindBuffer(gl::ARRAY_BUFFER, draw_call.platform.vb);
                         gl::BufferData(gl::ARRAY_BUFFER,
-                                        (draw_call.instance.len() * mem::size_of::<f32>()) as gl::types::GLsizeiptr,
-                                        draw_call.instance.as_ptr() as *const _, gl::STATIC_DRAW);
-                   }
+                                       (draw_call.instance.len() * mem::size_of::<f32>()) as gl::types::GLsizeiptr,
+                                       draw_call.instance.as_ptr() as *const _, gl::STATIC_DRAW);
+                    }
 
                     gl::UseProgram(csh.program);
                     gl::BindVertexArray(draw_call.platform.vao);
@@ -63,11 +60,11 @@ impl Cx{
     pub unsafe fn gl_string(raw_string: *const gl::types::GLubyte) -> String {
         if raw_string.is_null() { return "(NULL)".into() }
         String::from_utf8(CStr::from_ptr(raw_string as *const _).to_bytes().to_vec()).ok()
-                                    .expect("gl_string: non-UTF8 string")
+            .expect("gl_string: non-UTF8 string")
     }
-    
-  
-    pub fn repaint(&mut self, glutin_window:&glutin::GlWindow){
+
+
+    pub fn repaint(&mut self, glutin_window:&glutin::WindowedContext){
         unsafe{
             gl::Enable(gl::DEPTH_TEST);
             gl::DepthFunc(gl::LEQUAL);
@@ -77,24 +74,24 @@ impl Cx{
             gl::ClearColor(self.clear_color.x, self.clear_color.y, self.clear_color.z, self.clear_color.w);
             gl::Clear(gl::COLOR_BUFFER_BIT|gl::DEPTH_BUFFER_BIT);
         }
-        self.prepare_frame();        
+        self.prepare_frame();
         self.exec_draw_list(0);
 
         glutin_window.swap_buffers().unwrap();
     }
 
-    fn resize_window_to_turtle(&mut self, glutin_window:&glutin::GlWindow){
+    fn resize_window_to_turtle(&mut self, glutin_window:&glutin::WindowedContext){
         glutin_window.resize(PhysicalSize::new(
             (self.target_size.x * self.target_dpi_factor) as f64,
             (self.target_size.y * self.target_dpi_factor) as f64)
         );
     }
-    
+
     pub fn event_loop<F>(&mut self, mut event_handler:F)
-    where F: FnMut(&mut Cx, &mut Event),
-    { 
+        where F: FnMut(&mut Cx, &mut Event),
+    {
         for _i in 0..10{
-             self.platform.fingers_down.push(false);
+            self.platform.fingers_down.push(false);
         }
 
         let gl_request = GlRequest::Latest;
@@ -108,7 +105,7 @@ impl Cx{
             .with_vsync(true)
             .with_gl(gl_request)
             .with_gl_profile(gl_profile);
-        let glutin_window = glutin::GlWindow::new(window, context, &events_loop).unwrap();
+        let glutin_window = glutin::WindowedContext::new_windowed(window, context, &events_loop).unwrap();
 
         unsafe {
             glutin_window.make_current().unwrap();
@@ -130,9 +127,9 @@ impl Cx{
             ..Style::style(self)
         };
         self.load_binary_deps_from_file();
- 
+
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
-        
+
         self.redraw_area(Area::All);
 
         while self.running{
@@ -142,13 +139,13 @@ impl Cx{
                     match &event{
                         Event::Resized(_)=>{ // do thi
                             self.resize_window_to_turtle(&glutin_window);
-                            self.call_event_handler(&mut event_handler, &mut event); 
+                            self.call_event_handler(&mut event_handler, &mut event);
                             self.call_draw_event(&mut event_handler, &mut root_view);
                             self.repaint(&glutin_window);
                         },
                         Event::None=>{},
                         _=>{
-                            self.call_event_handler(&mut event_handler, &mut event); 
+                            self.call_event_handler(&mut event_handler, &mut event);
                         }
                     }
                 }
@@ -164,8 +161,8 @@ impl Cx{
                 self.call_draw_event(&mut event_handler, &mut root_view);
                 self.paint_dirty = true;
             }
-             
-             self.process_desktop_file_read_requests(&mut event_handler);
+
+            self.process_desktop_file_read_requests(&mut event_handler);
 
             // set a cursor
             if !self.down_mouse_cursor.is_none(){
@@ -176,7 +173,7 @@ impl Cx{
             }else{
                 self.set_winit_mouse_cursor(&glutin_window, MouseCursor::Default);
             }
-            
+
             // repaint everything if we need to
             if self.paint_dirty{
                 self.paint_dirty = false;
@@ -191,7 +188,7 @@ impl Cx{
                         match &event{
                             Event::Resized(_)=>{ // do thi
                                 self.resize_window_to_turtle(&glutin_window);
-                                self.call_event_handler(&mut event_handler, &mut event); 
+                                self.call_event_handler(&mut event_handler, &mut event);
                                 self.call_draw_event(&mut event_handler, &mut root_view);
                                 self.repaint(&glutin_window);
                             },
@@ -228,42 +225,42 @@ impl Cx{
 
     pub fn set_winit_mouse_cursor(&mut self, window:&winit::Window, mouse_cursor:MouseCursor){
         let (hide, cursor) = match mouse_cursor{
-                MouseCursor::Hidden=>(true,winit::MouseCursor::Default),
-                MouseCursor::Default=>(false,winit::MouseCursor::Default),
-                MouseCursor::Crosshair=>(false,winit::MouseCursor::Crosshair),
-                MouseCursor::Hand=>(false,winit::MouseCursor::Hand),
-                MouseCursor::Arrow=>(false,winit::MouseCursor::Arrow),
-                MouseCursor::Move=>(false,winit::MouseCursor::Move),
-                MouseCursor::Text=>(false,winit::MouseCursor::Text),
-                MouseCursor::Wait=>(false,winit::MouseCursor::Wait),
-                MouseCursor::Help=>(false,winit::MouseCursor::Help),
-                MouseCursor::Progress=>(false,winit::MouseCursor::Progress),
-                MouseCursor::NotAllowed=>(false,winit::MouseCursor::NotAllowed),
-                MouseCursor::ContextMenu=>(false,winit::MouseCursor::ContextMenu),
-                MouseCursor::Cell=>(false,winit::MouseCursor::Cell),
-                MouseCursor::VerticalText=>(false,winit::MouseCursor::VerticalText),
-                MouseCursor::Alias=>(false,winit::MouseCursor::Alias),
-                MouseCursor::Copy=>(false,winit::MouseCursor::Copy),
-                MouseCursor::NoDrop=>(false,winit::MouseCursor::NoDrop),
-                MouseCursor::Grab=>(false,winit::MouseCursor::Grab),
-                MouseCursor::Grabbing=>(false,winit::MouseCursor::Grabbing),
-                MouseCursor::AllScroll=>(false,winit::MouseCursor::AllScroll),
-                MouseCursor::ZoomIn=>(false,winit::MouseCursor::ZoomIn),
-                MouseCursor::ZoomOut=>(false,winit::MouseCursor::ZoomOut),
-                MouseCursor::NResize=>(false,winit::MouseCursor::NResize),
-                MouseCursor::NeResize=>(false,winit::MouseCursor::NeResize),
-                MouseCursor::EResize=>(false,winit::MouseCursor::EResize),
-                MouseCursor::SeResize=>(false,winit::MouseCursor::SeResize),
-                MouseCursor::SResize=>(false,winit::MouseCursor::SResize),
-                MouseCursor::SwResize=>(false,winit::MouseCursor::SwResize),
-                MouseCursor::WResize=>(false,winit::MouseCursor::WResize),
-                MouseCursor::NwResize=>(false,winit::MouseCursor::NwResize),
-                MouseCursor::NsResize=>(false,winit::MouseCursor::NsResize),
-                MouseCursor::NeswResize=>(false,winit::MouseCursor::NeswResize),
-                MouseCursor::EwResize=>(false,winit::MouseCursor::EwResize),
-                MouseCursor::NwseResize=>(false,winit::MouseCursor::NwseResize),
-                MouseCursor::ColResize=>(false,winit::MouseCursor::ColResize),
-                MouseCursor::RowResize=>(false,winit::MouseCursor::RowResize),
+            MouseCursor::Hidden=>(true,winit::MouseCursor::Default),
+            MouseCursor::Default=>(false,winit::MouseCursor::Default),
+            MouseCursor::Crosshair=>(false,winit::MouseCursor::Crosshair),
+            MouseCursor::Hand=>(false,winit::MouseCursor::Hand),
+            MouseCursor::Arrow=>(false,winit::MouseCursor::Arrow),
+            MouseCursor::Move=>(false,winit::MouseCursor::Move),
+            MouseCursor::Text=>(false,winit::MouseCursor::Text),
+            MouseCursor::Wait=>(false,winit::MouseCursor::Wait),
+            MouseCursor::Help=>(false,winit::MouseCursor::Help),
+            MouseCursor::Progress=>(false,winit::MouseCursor::Progress),
+            MouseCursor::NotAllowed=>(false,winit::MouseCursor::NotAllowed),
+            MouseCursor::ContextMenu=>(false,winit::MouseCursor::ContextMenu),
+            MouseCursor::Cell=>(false,winit::MouseCursor::Cell),
+            MouseCursor::VerticalText=>(false,winit::MouseCursor::VerticalText),
+            MouseCursor::Alias=>(false,winit::MouseCursor::Alias),
+            MouseCursor::Copy=>(false,winit::MouseCursor::Copy),
+            MouseCursor::NoDrop=>(false,winit::MouseCursor::NoDrop),
+            MouseCursor::Grab=>(false,winit::MouseCursor::Grab),
+            MouseCursor::Grabbing=>(false,winit::MouseCursor::Grabbing),
+            MouseCursor::AllScroll=>(false,winit::MouseCursor::AllScroll),
+            MouseCursor::ZoomIn=>(false,winit::MouseCursor::ZoomIn),
+            MouseCursor::ZoomOut=>(false,winit::MouseCursor::ZoomOut),
+            MouseCursor::NResize=>(false,winit::MouseCursor::NResize),
+            MouseCursor::NeResize=>(false,winit::MouseCursor::NeResize),
+            MouseCursor::EResize=>(false,winit::MouseCursor::EResize),
+            MouseCursor::SeResize=>(false,winit::MouseCursor::SeResize),
+            MouseCursor::SResize=>(false,winit::MouseCursor::SResize),
+            MouseCursor::SwResize=>(false,winit::MouseCursor::SwResize),
+            MouseCursor::WResize=>(false,winit::MouseCursor::WResize),
+            MouseCursor::NwResize=>(false,winit::MouseCursor::NwResize),
+            MouseCursor::NsResize=>(false,winit::MouseCursor::NsResize),
+            MouseCursor::NeswResize=>(false,winit::MouseCursor::NeswResize),
+            MouseCursor::EwResize=>(false,winit::MouseCursor::EwResize),
+            MouseCursor::NwseResize=>(false,winit::MouseCursor::NwseResize),
+            MouseCursor::ColResize=>(false,winit::MouseCursor::ColResize),
+            MouseCursor::RowResize=>(false,winit::MouseCursor::RowResize),
         };
         window.set_cursor(cursor);
         window.hide_cursor(hide);
@@ -280,7 +277,7 @@ impl Cx{
                     }
                     self.platform.last_mouse_pos.x += delta.0 as f32;//position.x as f32;
                     self.platform.last_mouse_pos.y += delta.1 as f32;//position.y as f32;
-                    
+
                     return self.make_mouse_move_events();/*vec![Event::FingerHover(FingerHoverEvent{
                         x:self.platform.last_x,
                         y:self.platform.last_y,
@@ -309,7 +306,7 @@ impl Cx{
                                 winit::MouseScrollDelta::LineDelta(_dx,dy)=>-dy*32.0,
                                 winit::MouseScrollDelta::PixelDelta(pp)=>pp.y as f32
                             }
-                        ), 
+                        ),
                     })]
                 },
                 winit::WindowEvent::CursorMoved{position,..}=>{
@@ -334,7 +331,7 @@ impl Cx{
                 winit::WindowEvent::CursorLeft{..}=>{
                     self.platform.is_cursor_in_window = false;
                     self.hover_mouse_cursor = None;
-                   // fire a hover out on our last known mouse position
+                    // fire a hover out on our last known mouse position
                     return vec![Event::FingerHover(FingerHoverEvent{
                         abs:self.platform.last_mouse_pos,
                         rel:self.platform.last_mouse_pos,
@@ -392,7 +389,7 @@ impl Cx{
                         }
                     }
                 },
-               
+
                 winit::WindowEvent::CloseRequested =>{
                     self.running = false;
                     return vec![Event::CloseRequested]
@@ -439,27 +436,27 @@ impl Cx{
     pub fn compile_has_shader_error(compile:bool, shader:gl::types::GLuint, source:&str)->Option<String>{
         unsafe{
             let mut success = i32::from(gl::FALSE);
-           
+
             if compile{
                 gl::GetShaderiv(shader, gl::COMPILE_STATUS, &mut success);
             }
             else{
                 gl::GetProgramiv(shader, gl::LINK_STATUS, &mut success);
             };
-           
+
             if success != i32::from(gl::TRUE) {
-                 let mut info_log = Vec::<u8>::with_capacity(2048);
+                let mut info_log = Vec::<u8>::with_capacity(2048);
                 info_log.set_len(2047);
                 for i in 0..2047{
                     info_log[i] = 0;
                 };
                 if compile{
                     gl::GetShaderInfoLog(shader, 2048, ptr::null_mut(),
-                        info_log.as_mut_ptr() as *mut gl::types::GLchar)
+                                         info_log.as_mut_ptr() as *mut gl::types::GLchar)
                 }
                 else{
                     gl::GetProgramInfoLog(shader, 2048, ptr::null_mut(),
-                        info_log.as_mut_ptr() as *mut gl::types::GLchar)
+                                          info_log.as_mut_ptr() as *mut gl::types::GLchar)
                 }
                 let mut r = "".to_string();
                 r.push_str(&String::from_utf8(info_log).unwrap());
@@ -487,7 +484,7 @@ impl Cx{
             let mut name = prefix.to_string();
             name.push_str(&i.to_string());
             name.push_str("\0");
-            
+
             let mut size = ((slots - i*4)) as gl::types::GLsizei;
             if size > 4{
                 size = 4;
@@ -546,7 +543,7 @@ impl Cx{
         // now we have a pixel and a vertex shader
         // so lets now pass it to GL
         unsafe{
-            
+
             let vs = gl::CreateShader(gl::VERTEX_SHADER);
             gl::ShaderSource(vs, 1, [ash.vertex.as_ptr() as *const _].as_ptr(), ptr::null());
             gl::CompileShader(vs);
@@ -585,15 +582,15 @@ impl Cx{
             gl::GenBuffers(1, &mut geom_vb);
             gl::BindBuffer(gl::ARRAY_BUFFER, geom_vb);
             gl::BufferData(gl::ARRAY_BUFFER,
-                            (sh.geometry_vertices.len() * mem::size_of::<f32>()) as gl::types::GLsizeiptr,
-                            sh.geometry_vertices.as_ptr() as *const _, gl::STATIC_DRAW);
+                           (sh.geometry_vertices.len() * mem::size_of::<f32>()) as gl::types::GLsizeiptr,
+                           sh.geometry_vertices.as_ptr() as *const _, gl::STATIC_DRAW);
 
             let mut geom_ib = mem::uninitialized();
             gl::GenBuffers(1, &mut geom_ib);
             gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, geom_ib);
             gl::BufferData(gl::ELEMENT_ARRAY_BUFFER,
-                            (sh.geometry_indices.len() * mem::size_of::<u32>()) as gl::types::GLsizeiptr,
-                            sh.geometry_indices.as_ptr() as *const _, gl::STATIC_DRAW);
+                           (sh.geometry_indices.len() * mem::size_of::<u32>()) as gl::types::GLsizeiptr,
+                           sh.geometry_indices.as_ptr() as *const _, gl::STATIC_DRAW);
 
             // lets fetch the uniform positions for our uniforms
             return Ok(CompiledShader{
@@ -641,8 +638,8 @@ impl Cx{
             let id = texture_2d_ids[o] as usize;
             unsafe{
                 gl::ActiveTexture(gl::TEXTURE0 + o as u32);
-            }        
-            
+            }
+
             if loc.loc >=0{
                 let tex = &mut textures_2d[id];
                 if tex.dirty{
@@ -763,7 +760,7 @@ impl DrawCallPlatform{
                 self.vao = mem::uninitialized();
                 gl::GenVertexArrays(1, &mut self.vao);
                 gl::BindVertexArray(self.vao);
-                
+
                 // bind the vertex and indexbuffers
                 gl::BindBuffer(gl::ARRAY_BUFFER, csh.geom_vb);
                 for attr in &csh.geom_attribs{
@@ -775,7 +772,7 @@ impl DrawCallPlatform{
                 self.vb = mem::uninitialized();
                 gl::GenBuffers(1, &mut self.vb);
                 gl::BindBuffer(gl::ARRAY_BUFFER, self.vb);
-                
+
                 for attr in &csh.inst_attribs{
                     gl::VertexAttribPointer(attr.loc, attr.size, gl::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
                     gl::EnableVertexAttribArray(attr.loc);
