@@ -1,5 +1,3 @@
-
-use crate::math::*;
 use crate::cx::*; 
 
 #[derive(Clone, Default, Debug, PartialEq, Copy)]
@@ -31,6 +29,21 @@ impl Default for Area{
     }
 }
 
+pub struct InstanceReadRef<'a>{
+    pub offset:usize,
+    pub slots:usize,
+    pub count:usize,
+    pub buffer:&'a Vec<f32>
+}
+
+pub struct InstanceWriteRef<'a>{
+    pub offset:usize,
+    pub slots:usize,
+    pub count:usize,
+    pub buffer:&'a mut Vec<f32>
+}
+
+
 impl Area{
     pub fn is_empty(&self)->bool{
         if let Area::Empty = self{
@@ -61,8 +74,28 @@ impl Area{
             _=>false,
         }
     }
+    
+    pub fn get_scroll_pos(&self, cx:&Cx)->Vec2{
+        return match self{
+            Area::Instance(inst)=>{
+                let draw_list = &cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    Vec2::zero()
+                }
+                else{
+                    draw_list.get_scroll_pos()
+                }
+            },
+            Area::DrawList(draw_list_area)=>{
+                let draw_list = &cx.draw_lists[draw_list_area.draw_list_id];
+                draw_list.get_scroll_pos()
+            },
+            _=>Vec2::zero(),
+        }
+    }
 
-    pub fn get_rect(&self, cx:&Cx)->Rect{
+    pub fn get_rect_scrolled(&self, cx:&Cx)->Rect{
+
         return match self{
             Area::Instance(inst)=>{
                 if inst.instance_count == 0{
@@ -99,8 +132,45 @@ impl Area{
         }
     }
 
+    pub fn abs_to_rel_scrolled(&self, cx:&Cx, abs:Vec2)->Vec2{
+        return match self{
+            Area::Instance(inst)=>{
+                if inst.instance_count == 0{
+                    println!("abs_to_rel_scroll called on instance_count ==0 area pointer, use mark/sweep correctly!");
+                    return abs
+                }
+                let draw_list = &cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    return abs;
+                }
+                let draw_call = &draw_list.draw_calls[inst.draw_call_id];
+                let csh = &cx.compiled_shaders[draw_call.shader_id];
+                // ok now we have to patch x/y/w/h into it
+                if let Some(ix) = csh.rect_instance_props.x{
+                    let x = draw_call.instance[inst.instance_offset + ix];
+                    if let Some(iy) = csh.rect_instance_props.y{
+                        let y = draw_call.instance[inst.instance_offset + iy];
+                        let scroll = draw_list.get_scroll_pos();
+                        return Vec2{
+                            x:abs.x - x + scroll.x,
+                            y:abs.y - y + scroll.y
+                        }
+                    }
+                }
+                abs
+            },
+            Area::DrawList(draw_list_area)=>{
+                let draw_list = &cx.draw_lists[draw_list_area.draw_list_id];
+                Vec2{
+                    x:abs.x - draw_list.rect.x,
+                    y:abs.y - draw_list.rect.y
+                }
+            },
+            _=>abs,
+        }
+    }
 
-    pub fn get_rect_no_scrolling(&self, cx:&Cx)->Rect{
+    pub fn get_rect_not_scrolled(&self, cx:&Cx)->Rect{
         return match self{
             Area::Instance(inst)=>{
                 if inst.instance_count == 0{
@@ -169,261 +239,208 @@ impl Area{
          }
     }
 
-    /*
-    // moved into cxdrawing_turtle for borrowchecker reasons
-    pub fn move_xy(&self, dx:f32, dy:f32, cd:&mut CxDrawing){
-        return match self{
+    pub fn get_prop_offset(&self, cx:&Cx, prop_name:&str)->usize{
+        match self{
             Area::Instance(inst)=>{
-                if inst.instance_count == 0{
-                    return;
-                }
-                let draw_list = &mut cd.draw_lists[inst.draw_list_id];
-                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
-                let csh = &cd.compiled_shaders[draw_call.shader_id];
-
-                for i in 0..inst.instance_count{
-                    if let Some(x) = csh.rect_instance_props.x{
-                        draw_call.instance[inst.instance_offset + x + i * csh.instance_slots] += dx;
-                    }
-                    if let Some(y) = csh.rect_instance_props.y{
-                        draw_call.instance[inst.instance_offset + y+ i * csh.instance_slots] += dy;
+                let draw_list = &cx.draw_lists[inst.draw_list_id];
+                let draw_call = &draw_list.draw_calls[inst.draw_call_id];
+                let csh = &cx.compiled_shaders[draw_call.shader_id];
+                for prop in &csh.named_instance_props.props{
+                    if prop.name == prop_name{
+                        return prop.offset
                     }
                 }
             }
-            Area::DrawList(area_draw_list)=>{
-                let draw_list = &mut cd.draw_lists[area_draw_list.draw_list_id];
-                draw_list.rect.x += dx;
-                draw_list.rect.y += dy;
-            },
             _=>(),
         }
+        println!("get_prop_offset {} called on invalid prop", prop_name);
+        0
     }
-    */
 
-    pub fn write_float(&self, cx:&mut Cx, prop_name:&str, value:f32){
+    pub fn get_read_ref<'a>(&self, cx:&'a Cx)->Option<InstanceReadRef<'a>>{
+        match self{
+            Area::Instance(inst)=>{
+                let draw_list = &cx.draw_lists[inst.draw_list_id];
+                let draw_call = &draw_list.draw_calls[inst.draw_call_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("get_read_ref alled on invalid area pointer, use mark/sweep correctly!");
+                    return None;
+                }
+                let csh = &cx.compiled_shaders[draw_call.shader_id];
+                return Some(
+                    InstanceReadRef{
+                        offset:inst.instance_offset, 
+                        count:inst.instance_count, 
+                        slots:csh.instance_slots,
+                        buffer:&draw_call.instance
+                    }
+                )
+            }
+            _=>(),
+        }
+        return None;
+    }
+
+    pub fn get_write_ref<'a>(&self, cx:&'a mut Cx)->Option<InstanceWriteRef<'a>>{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("write_float {}  called on invalid area pointer, use mark/sweep correctly!", prop_name);
-                    return;
-                }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
-
-                let csh = &cx.compiled_shaders[draw_call.shader_id];
-
-                for prop in &csh.named_instance_props.props{
-                    if prop.name == prop_name{
-                        cx.paint_dirty = true;
-                        draw_call.instance_dirty = true;
-                        let mut off = inst.instance_offset + prop.offset;
-                        for _i in 0..inst.instance_count{
-                            draw_call.instance[off + 0] = value;
-                            off += csh.instance_slots;
-                        }
-                        return
-                    }
+                if draw_list.redraw_id != inst.redraw_id {
+                    //println!("get_write_ref called on invalid area pointer, use mark/sweep correctly!");
+                    return None;
                 }
-            },
+                let csh = &cx.compiled_shaders[draw_call.shader_id];
+                cx.paint_dirty = true;
+                draw_call.instance_dirty = true;
+                return Some(
+                    InstanceWriteRef{
+                        offset:inst.instance_offset, 
+                        count:inst.instance_count, 
+                        slots:csh.instance_slots,
+                        buffer:&mut draw_call.instance
+                    }
+                )
+            }
             _=>(),
+        }
+        return None;
+    }
+
+    pub fn write_float(&self, cx:&mut Cx, prop_name:&str, value:f32){
+        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let write = self.get_write_ref(cx);
+        if let Some(write) = write{
+            for i in 0..write.count{
+                write.buffer[write.offset + prop_offset + i * write.slots] = value;
+            }
         }
     }
 
     pub fn read_float(&self, cx:&Cx, prop_name:&str)->f32{
-        match self{
-            Area::Instance(inst)=>{
-                let draw_list = &cx.draw_lists[inst.draw_list_id];
-                let draw_call = &draw_list.draw_calls[inst.draw_call_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("read_float {} called on invalid area pointer, use mark/sweep correctly!", prop_name);
-                    return 0.0;
-                }
-                let csh = &cx.compiled_shaders[draw_call.shader_id];
-
-                for prop in &csh.named_instance_props.props{
-                    if prop.name == prop_name{
-                        return draw_call.instance[inst.instance_offset + prop.offset + 0]
-                    }
-                }
-            }
-            _=>(),
+        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let read = self.get_read_ref(cx);
+        if let Some(read) = read{
+            read.buffer[read.offset + prop_offset]
         }
-        return 0.0;
+        else{
+            0.0
+        }
     }
 
    pub fn write_vec2(&self, cx:&mut Cx, prop_name:&str, value:Vec2){
-        match self{
-            Area::Instance(inst)=>{
-                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("write_vec2 {} called on invalid area pointer, use mark/sweep correctly!",prop_name);
-                    return;
-                }
-                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
-                let csh = &cx.compiled_shaders[draw_call.shader_id];
-                for prop in &csh.named_instance_props.props{
-                    if prop.name == prop_name{
-                        cx.paint_dirty = true;
-                        draw_call.instance_dirty = true;
-                        let mut off = inst.instance_offset + prop.offset;
-                        for _i in 0..inst.instance_count{
-                            draw_call.instance[off + 0] = value.x;
-                            draw_call.instance[off + 1] = value.y;
-                            off += csh.instance_slots;
-                        }
-                        return
-                    }
-                }
+        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let write = self.get_write_ref(cx);
+        if let Some(write) = write{
+            for i in 0..write.count{
+                write.buffer[write.offset + prop_offset + 0 + i * write.slots] = value.y;
+                write.buffer[write.offset + prop_offset + 1 + i * write.slots] = value.x;
             }
-            _=>(),
         }
-    }
+   }
 
     pub fn read_vec2(&self, cx:&Cx, prop_name:&str)->Vec2{
-        match self{
-            Area::Instance(inst)=>{
-                let draw_list = &cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("read_vec2 {} called on invalid area pointer, use mark/sweep correctly!",prop_name);
-                    return vec2(0.0,0.0)
-                }
-                let draw_call = &draw_list.draw_calls[inst.draw_call_id];
-                let csh = &cx.compiled_shaders[draw_call.shader_id];
-
-                for prop in &csh.named_instance_props.props{
-                    if prop.name == prop_name{
-                        let off = inst.instance_offset + prop.offset;
-                        return Vec2{
-                            x:draw_call.instance[off + 0],
-                            y:draw_call.instance[off + 1]
-                        }
-                    }
-                }
-            },
-            _=>(),
+        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let read = self.get_read_ref(cx);
+        if let Some(read) = read{
+            Vec2{
+                x:read.buffer[read.offset + prop_offset + 0],
+                y:read.buffer[read.offset + prop_offset + 1]
+            }
         }
-        return vec2(0.0,0.0);
-    }
-
-    pub fn write_vec3(&self, cx:&mut Cx, prop_name:&str, value:Vec3){
-        match self{
-            Area::Instance(inst)=>{
-                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("write_vec3 {} called on invalid area pointer, use mark/sweep correctly!",prop_name);
-                    return
-                }
-                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
-                let csh = &cx.compiled_shaders[draw_call.shader_id];
-
-                for prop in &csh.named_instance_props.props{
-                    if prop.name == prop_name{
-                        cx.paint_dirty = true;
-                        draw_call.instance_dirty = true;
-                        let mut off = inst.instance_offset + prop.offset;
-                        for _i in 0..inst.instance_count{
-                            draw_call.instance[off + 0] = value.x;
-                            draw_call.instance[off + 1] = value.y;
-                            draw_call.instance[off + 2] = value.z;
-                            off += csh.instance_slots;
-                        }
-                        return
-                    }
-                }
-            },
-            _=>(),
+        else{
+            Vec2::zero()
         }
     }
+
+   pub fn write_vec3(&self, cx:&mut Cx, prop_name:&str, value:Vec3){
+        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let write = self.get_write_ref(cx);
+        if let Some(write) = write{
+            for i in 0..write.count{
+                write.buffer[write.offset + prop_offset + 0 + i * write.slots] = value.y;
+                write.buffer[write.offset + prop_offset + 1 + i * write.slots] = value.x;
+                write.buffer[write.offset + prop_offset + 2 + i * write.slots] = value.z;
+            }
+        }
+   }
 
     pub fn read_vec3(&self, cx:&Cx, prop_name:&str)->Vec3{
-        match self{
-            Area::Instance(inst)=>{
-                let draw_list = &cx.draw_lists[inst.draw_list_id];
-                let draw_call = &draw_list.draw_calls[inst.draw_call_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("read_vec3 {} called on invalid area pointer, use mark/sweep correctly!",prop_name);
-                    return vec3(0.,0.,0.)
-                }
-                let csh = &cx.compiled_shaders[draw_call.shader_id];
-
-                for prop in &csh.named_instance_props.props{
-                    if prop.name == prop_name{
-                        let off = inst.instance_offset + prop.offset;
-                        return Vec3{
-                            x:draw_call.instance[off + 0],
-                            y:draw_call.instance[off + 1],
-                            z:draw_call.instance[off + 2]
-                        }
-                    }
-                }
+        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let read = self.get_read_ref(cx);
+        if let Some(read) = read{
+            Vec3{
+                x:read.buffer[read.offset + prop_offset + 0],
+                y:read.buffer[read.offset + prop_offset + 1],
+                z:read.buffer[read.offset + prop_offset + 2]
             }
-            _=>(),
         }
-        return vec3(0.0,0.0,0.0);
-    }
-
-    pub fn write_vec4(&self, cx:&mut Cx, prop_name:&str, value:Vec4){
-        match self{
-            Area::Instance(inst)=>{
-                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("write_vec4 {} called on invalid area pointer, use mark/sweep correctly!",prop_name);
-                    return
-                }
-                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
-                let csh = &cx.compiled_shaders[draw_call.shader_id];
-
-                for prop in &csh.named_instance_props.props{
-                    if prop.name == prop_name{
-                        cx.paint_dirty = true;
-                        draw_call.instance_dirty = true;
-                        let mut off = inst.instance_offset + prop.offset;
-                        for _i in 0..inst.instance_count{
-                            draw_call.instance[off + 0] = value.x;
-                            draw_call.instance[off + 1] = value.y;
-                            draw_call.instance[off + 2] = value.z;
-                            draw_call.instance[off + 3] = value.w;
-                            off += csh.instance_slots;
-                        }
-                        return
-                    }
-                }
-            },
-            _=>(),
+        else{
+            Vec3::zero()
         }
     }
+
+   pub fn write_vec4(&self, cx:&mut Cx, prop_name:&str, value:Vec4){
+        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let write = self.get_write_ref(cx);
+        if let Some(write) = write{
+            for i in 0..write.count{
+                write.buffer[write.offset + prop_offset + 0 + i * write.slots] = value.x;
+                write.buffer[write.offset + prop_offset + 1 + i * write.slots] = value.y;
+                write.buffer[write.offset + prop_offset + 2 + i * write.slots] = value.z;
+                write.buffer[write.offset + prop_offset + 3 + i * write.slots] = value.w;
+            }
+        }
+   }
 
     pub fn read_vec4(&self, cx:&Cx, prop_name:&str)->Vec4{
-        match self{
-            Area::Instance(inst)=>{
-                let draw_list = &cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("read_vec4 {} called on invalid area pointer, use mark/sweep correctly!", prop_name);
-                    return vec4(0.,0.,0.,0.)
-                }
-                let draw_call = &draw_list.draw_calls[inst.draw_call_id];
-                let csh = &cx.compiled_shaders[draw_call.shader_id];
-
-                for prop in &csh.named_instance_props.props{
-                    if prop.name == prop_name{
-                        let off = inst.instance_offset + prop.offset;
-                        return Vec4{
-                            x:draw_call.instance[off + 0],
-                            y:draw_call.instance[off + 1],
-                            z:draw_call.instance[off + 2],
-                            w:draw_call.instance[off + 3]
-                        }
-                    }
-                }
-            },
-            _=>(),
+        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let read = self.get_read_ref(cx);
+        if let Some(read) = read{
+            Vec4{
+                x:read.buffer[read.offset + prop_offset + 0],
+                y:read.buffer[read.offset + prop_offset + 1],
+                z:read.buffer[read.offset + prop_offset + 2],
+                w:read.buffer[read.offset + prop_offset + 3],
+            }
         }
-        return vec4(0.0,0.0,0.0,0.0);
+        else{
+            Vec4::zero()
+        }
+    }
+
+    pub fn write_color(&self, cx:&mut Cx, prop_name:&str, value:Color){
+        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let write = self.get_write_ref(cx);
+        if let Some(write) = write{
+            for i in 0..write.count{
+                write.buffer[write.offset + prop_offset + 0 + i * write.slots] = value.r;
+                write.buffer[write.offset + prop_offset + 1 + i * write.slots] = value.g;
+                write.buffer[write.offset + prop_offset + 2 + i * write.slots] = value.b;
+                write.buffer[write.offset + prop_offset + 3 + i * write.slots] = value.a;
+            }
+        }
+   }
+
+    pub fn read_color(&self, cx:&Cx, prop_name:&str)->Color{
+        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let read = self.get_read_ref(cx);
+        if let Some(read) = read{
+            Color{
+                r:read.buffer[read.offset + prop_offset + 0],
+                g:read.buffer[read.offset + prop_offset + 1],
+                b:read.buffer[read.offset + prop_offset + 2],
+                a:read.buffer[read.offset + prop_offset + 3],
+            }
+        }
+        else{
+            Color::zero()
+        }
     }
 }
 
 impl InstanceArea{
-    pub fn get_area(self)->Area{
+    pub fn into_area(self)->Area{
         Area::Instance(self)
     }
 
@@ -486,6 +503,18 @@ impl InstanceArea{
         draw_call.instance.push(value.w);
     }
 
+    pub fn push_color(&self, cx:&mut Cx, value:Color){
+        let draw_list = &mut cx.draw_lists[self.draw_list_id];
+        if draw_list.redraw_id != self.redraw_id {
+            println!("push_vec4 called on invalid area pointer, use mark/sweep correctly!");
+            return
+        }
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
+        draw_call.instance.push(value.r);
+        draw_call.instance.push(value.g);
+        draw_call.instance.push(value.b);
+        draw_call.instance.push(value.a);
+    }
 
     pub fn need_uniforms_now(&self, cx:&mut Cx)->bool{
         let draw_list = &mut cx.draw_lists[self.draw_list_id];
@@ -495,7 +524,7 @@ impl InstanceArea{
         }
         let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
         //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
-        return draw_call.need_uniforms_now
+        return draw_call.need_uniforms_now()
     }
 
    pub fn push_uniform_texture_2d(&self, cx:&mut Cx,texture_id: usize){

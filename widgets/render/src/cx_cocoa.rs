@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use cocoa::base::{id, nil};
 use cocoa::{appkit, foundation};
-use cocoa::appkit::{NSApplication, NSEventModifierFlags, NSImage, NSEvent, NSWindow, NSView,NSEventMask,NSRunningApplication};
+use cocoa::appkit::{NSStringPboardType, NSApplication, NSEventModifierFlags, NSImage, NSEvent, NSWindow, NSView,NSEventMask,NSRunningApplication};
 use cocoa::foundation::{NSArray, NSPoint, NSDictionary, NSRect, NSSize, NSUInteger,NSInteger};
 use cocoa::foundation::{NSAutoreleasePool, NSString};
 use objc::runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO};
@@ -13,10 +13,11 @@ use objc::declare::ClassDecl;
 use std::os::raw::c_void;
 use objc::*;
 use core_graphics::display::CGDisplay;
+use time::precise_time_ns;
 
 use crate::cx::*;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct CocoaWindow{
     pub window_delegate:Option<id>,
     pub view:Option<id>,
@@ -24,11 +25,13 @@ pub struct CocoaWindow{
     pub attributes_for_marked_text:Option<id>,
     pub empty_string:Option<id>,
     //pub input_context:Option<id>,
+    pub pasteboard:Option<id>,
     pub init_resize:bool,
     pub last_size:Vec2,
     pub ime_spot:Vec2,
     pub last_dpi_factor:f32,
-    pub last_key_mod:KeyMod,
+    pub time_start:u64,
+    pub last_key_mod:KeyModifiers,
     pub fingers_down:Vec<bool>,
     pub cursors:HashMap<MouseCursor, id>,
     pub current_cursor:MouseCursor,
@@ -124,12 +127,23 @@ impl CocoaWindow{
             //self.input_context = Some(input_context);
             self.last_size = self.get_inner_size();
             self.last_dpi_factor = self.get_dpi_factor();
+            self.time_start = precise_time_ns();
+
             let _: () = msg_send![autoreleasepool, drain];
 
             let input_context:id = msg_send![view, inputContext];
             msg_send![input_context, invalidateCharacterCoordinates];
+
+            // grab the pasteboard
+            let pasteboard:id = msg_send![class!(NSPasteboard), generalPasteboard];
+            self.pasteboard = Some(pasteboard);
             //msg_send![input_context, activate];
         }
+    }
+
+    pub fn time_now(&self)->f64{
+        let time_now = precise_time_ns();
+        (time_now - self.time_start) as f64 / 1_000_000_000.0
     }
 
     pub fn set_position(&mut self, pos:Vec2){
@@ -140,21 +154,21 @@ impl CocoaWindow{
     }
 
     pub fn get_position(&mut self)->Vec2{
-        let view_frame = unsafe { NSView::frame(self.view.unwrap()) };
+        //let view_frame = unsafe { NSView::frame(self.view.unwrap()) };
         let rect = NSRect::new(
-            NSPoint::new(0.0, view_frame.size.height),
+            NSPoint::new(0.0, 0.0),//view_frame.size.height),
             NSSize::new(0.0, 0.0),
         );
         let out = unsafe{NSWindow::convertRectToScreen_(self.window.unwrap(), rect)};
-        vec2(out.origin.x as f32, out.origin.y as f32)
+        Vec2{x:out.origin.x as f32, y:out.origin.y as f32}
     }
 
     pub fn get_inner_size(&self)->Vec2{
         if self.view.is_none(){
-            return vec2(0.,0.);
+            return Vec2::zero();
         }
         let view_frame = unsafe { NSView::frame(self.view.unwrap()) };
-        vec2(view_frame.size.width as f32, view_frame.size.height as f32)
+        Vec2{x:view_frame.size.width as f32, y:view_frame.size.height as f32}
     }
 
     pub fn get_dpi_factor(&self)->f32{
@@ -178,7 +192,7 @@ impl CocoaWindow{
         match ns_event.eventType(){
             appkit::NSKeyUp => {
                 if let Some(key_code) = get_event_keycode(ns_event){
-                    let key_mod = get_event_key_mod(ns_event);
+                    let modifiers = get_event_key_modifier(ns_event);
                     let key_char = get_event_char(ns_event);
                     let is_repeat:bool = msg_send![ns_event, isARepeat];
                     self.do_callback(&mut vec![
@@ -186,47 +200,99 @@ impl CocoaWindow{
                             key_code:key_code,
                             key_char:key_char,
                             is_repeat:is_repeat,
-                            with_shift:key_mod.shift,
-                            with_control:key_mod.control,
-                            with_alt:key_mod.alt,
-                            with_logo:key_mod.logo,
+                            modifiers:modifiers,
+                            time:self.time_now()
                         })
                     ]);
                 }
             },
             appkit::NSKeyDown => {
                 if let Some(key_code) = get_event_keycode(ns_event){
-                    let key_mod = get_event_key_mod(ns_event);
+                    let modifiers = get_event_key_modifier(ns_event);
                     let key_char = get_event_char(ns_event);
                     let is_repeat:bool = msg_send![ns_event, isARepeat];
+                    let is_return = if let KeyCode::Return = key_code{true} else{false};
+
+                    // see if its is paste, ifso TextInput was_paste the text
+                    let paste_text = if let KeyCode::KeyV = key_code{
+                        if modifiers.logo || modifiers.control{
+                            // was a paste
+                            let nsstring:id = msg_send![self.pasteboard.unwrap(), stringForType:NSStringPboardType];
+                            let string = nsstring_to_string(nsstring);
+                            
+                            Some(string)
+                        }
+                        else{None}
+                    }
+                    else{None};
+
+                    match key_code{
+                        KeyCode::KeyX | KeyCode::KeyC=>if modifiers.logo || modifiers.control{
+                            // cut or copy.
+                            let mut events = vec![
+                                Event::TextCopy(TextCopyEvent{
+                                    response:None
+                                })
+                            ];
+                            self.do_callback(&mut events);
+                            match &events[0]{
+                                Event::TextCopy(req)=>if let Some(response) = &req.response{
+                                    // plug it into the apple clipboard
+                                    let nsstring:id = NSString::alloc(nil).init_str(&response);
+                                    let array: id = msg_send![class!(NSArray), arrayWithObject:NSStringPboardType];
+                                    msg_send![self.pasteboard.unwrap(), declareTypes:array owner:nil];
+                                    msg_send![self.pasteboard.unwrap(), setString:nsstring forType:NSStringPboardType];
+                                },
+                                _=>()
+                            };
+                        },
+                        _=>{}
+                    }
+
                     self.do_callback(&mut vec![
                         Event::KeyDown(KeyEvent{
                             key_code:key_code,
                             key_char:key_char,
                             is_repeat:is_repeat,
-                            with_shift:key_mod.shift,
-                            with_control:key_mod.control,
-                            with_alt:key_mod.alt,
-                            with_logo:key_mod.logo,
+                            modifiers:modifiers,
+                            time:self.time_now()
                         })
                     ]);
+                    if is_return{
+                        self.do_callback(&mut vec![
+                            Event::TextInput(TextInputEvent{
+                                input:"\n".to_string(),
+                                was_paste:false,
+                                replace_last:false
+                            })
+                        ]);
+                    }
+                    if let Some(paste_text) = paste_text{
+                        self.do_callback(&mut vec![
+                            Event::TextInput(TextInputEvent{
+                                input:paste_text,
+                                was_paste:true,
+                                replace_last:false
+                            })
+                        ]);
+                    }
+                    
+
                 }
             },
             appkit::NSFlagsChanged => {
-                let key_mod = get_event_key_mod(ns_event);
+                let modifiers = get_event_key_modifier(ns_event);
                 let last_key_mod = self.last_key_mod.clone();
-                self.last_key_mod = key_mod.clone();
+                self.last_key_mod = modifiers.clone();
                 let mut events = Vec::new();
-                fn add_event(old:bool, new:bool, key_mod:KeyMod, events:&mut Vec<Event>, key_code:KeyCode){
+                fn add_event(time:f64, old:bool, new:bool, modifiers:KeyModifiers, events:&mut Vec<Event>, key_code:KeyCode){
                     if old != new{
                         let event = KeyEvent{
                             key_code:key_code,
                             key_char:'\0',
                             is_repeat:false,
-                            with_shift:key_mod.shift,
-                            with_control:key_mod.control,
-                            with_alt:key_mod.alt,
-                            with_logo:key_mod.logo,
+                            modifiers:modifiers,
+                            time:time
                         };
                         if new{
                             events.push(Event::KeyDown(event));
@@ -236,10 +302,11 @@ impl CocoaWindow{
                         }
                     }
                 }
-                add_event(last_key_mod.shift, key_mod.shift, key_mod.clone(), &mut events, KeyCode::LeftShift);
-                add_event(last_key_mod.alt, key_mod.alt, key_mod.clone(), &mut events, KeyCode::LeftAlt);
-                add_event(last_key_mod.logo, key_mod.logo, key_mod.clone(), &mut events, KeyCode::LeftLogo);
-                add_event(last_key_mod.control, key_mod.control, key_mod.clone(), &mut events, KeyCode::LeftControl);
+                let time = self.time_now();
+                add_event(time, last_key_mod.shift, modifiers.shift, modifiers.clone(), &mut events, KeyCode::Shift);
+                add_event(time, last_key_mod.alt, modifiers.alt, modifiers.clone(), &mut events, KeyCode::Alt);
+                add_event(time, last_key_mod.logo, modifiers.logo, modifiers.clone(), &mut events, KeyCode::Logo);
+                add_event(time, last_key_mod.control, modifiers.control, modifiers.clone(), &mut events, KeyCode::Control);
                 if events.len() > 0{
                     self.do_callback(&mut events);
                 }
@@ -254,25 +321,33 @@ impl CocoaWindow{
                 return if ns_event.hasPreciseScrollingDeltas() == cocoa::base::YES {
                     self.do_callback(&mut vec![
                         Event::FingerScroll(FingerScrollEvent{
-                            scroll:vec2(
-                                ns_event.scrollingDeltaX() as f32,
-                                -ns_event.scrollingDeltaY() as f32
-                            ),
-                            abs:vec2(self.last_mouse_pos.x, self.last_mouse_pos.y),
-                            rel:vec2(0.,0.),
-                            handled:false
+                            scroll:Vec2{
+                                x:-ns_event.scrollingDeltaX() as f32,
+                                y:-ns_event.scrollingDeltaY() as f32
+                            },
+                            abs:self.last_mouse_pos,
+                            rel:self.last_mouse_pos,
+                            rect:Rect::zero(),
+                            is_wheel:false,
+                            modifiers:get_event_key_modifier(ns_event),
+                            handled:false,
+                            time:self.time_now()
                         })
                     ]);
                 } else {
                     self.do_callback(&mut vec![
                         Event::FingerScroll(FingerScrollEvent{
-                            scroll:vec2(
-                                ns_event.scrollingDeltaX() as f32 * 32.,
-                                -ns_event.scrollingDeltaY() as f32 * 32.
-                            ),
-                            abs:vec2(self.last_mouse_pos.x, self.last_mouse_pos.y),
-                            rel:vec2(0.,0.),
-                            handled:false
+                            scroll:Vec2{
+                                x:-ns_event.scrollingDeltaX() as f32 * 32.,
+                                y:-ns_event.scrollingDeltaY() as f32 * 32.
+                            },
+                            abs:self.last_mouse_pos,
+                            rel:self.last_mouse_pos,
+                            rect:Rect::zero(),
+                            is_wheel:true,
+                            modifiers:get_event_key_modifier(ns_event),
+                            handled:false,
+                            time:self.time_now()
                         })
                     ]);
                 }
@@ -360,31 +435,38 @@ impl CocoaWindow{
         self.do_callback(&mut vec![Event::AppFocus(focus)]);
     }
 
-    pub fn send_finger_down(&mut self, digit:usize){
+    pub fn send_finger_down(&mut self, digit:usize, modifiers:KeyModifiers){
         self.fingers_down[digit] = true;
         self.do_callback(&mut vec![Event::FingerDown(FingerDownEvent{
             abs:self.last_mouse_pos,
             rel:self.last_mouse_pos,
+            rect:Rect::zero(),
             digit:digit,
             handled:false,
-            is_touch:false
+            is_touch:false,
+            modifiers:modifiers,
+            tap_count:0,
+            time:self.time_now()
         })]);
     }
 
-    pub fn send_finger_up(&mut self, digit:usize){
+    pub fn send_finger_up(&mut self, digit:usize, modifiers:KeyModifiers){
         self.fingers_down[digit] = false;
         self.do_callback(&mut vec![Event::FingerUp(FingerUpEvent{
             abs:self.last_mouse_pos,
             rel:self.last_mouse_pos,
-            abs_start:vec2(0., 0.),
-            rel_start:vec2(0., 0.),
+            rect:Rect::zero(),
+            abs_start:Vec2::zero(),
+            rel_start:Vec2::zero(),
             digit:digit,
             is_over:false,
-            is_touch:false
+            is_touch:false,
+            modifiers:modifiers,
+            time:self.time_now()
         })]);
     }
 
-    pub fn send_finger_hover_and_move(&mut self, pos:Vec2){
+    pub fn send_finger_hover_and_move(&mut self, pos:Vec2, modifiers:KeyModifiers){
         self.last_mouse_pos = pos;
         let mut events = Vec::new();
         for (digit, down) in self.fingers_down.iter().enumerate(){
@@ -392,19 +474,25 @@ impl CocoaWindow{
                 events.push(Event::FingerMove(FingerMoveEvent{
                     abs:pos,
                     rel:pos,
+                    rect:Rect::zero(),
                     digit:digit,
-                    abs_start:vec2(0.,0.),
-                    rel_start:vec2(0.,0.),
+                    abs_start:Vec2::zero(),
+                    rel_start:Vec2::zero(),
                     is_over:false,
-                    is_touch:false
+                    is_touch:false,
+                    modifiers:modifiers.clone(),
+                    time:self.time_now()
                 }));
             }
         };
         events.push(Event::FingerHover(FingerHoverEvent{
             abs:pos,
             rel:pos,
+            rect:Rect::zero(),
             handled:false,
             hover_state:HoverState::Over,
+            modifiers:modifiers,
+            time:self.time_now()
         }));
         self.do_callback(&mut events);
     }
@@ -416,6 +504,7 @@ impl CocoaWindow{
     pub fn send_text_input(&mut self, input:String, replace_last:bool){
         self.do_callback(&mut vec![Event::TextInput(TextInputEvent{
             input:input,
+            was_paste:false,
             replace_last:replace_last
         })])
     }
@@ -439,19 +528,11 @@ fn get_event_char(event: id) -> char {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct KeyMod {
-    pub shift: bool,
-    pub control: bool,
-    pub alt: bool,
-    pub logo: bool
-}
-
-fn get_event_key_mod(event: id) -> KeyMod {
+fn get_event_key_modifier(event: id) -> KeyModifiers {
     let flags = unsafe {
         NSEvent::modifierFlags(event)
     };
-    KeyMod {
+    KeyModifiers {
         shift: flags.contains(NSEventModifierFlags::NSShiftKeyMask),
         control: flags.contains(NSEventModifierFlags::NSControlKeyMask),
         alt: flags.contains(NSEventModifierFlags::NSAlternateKeyMask),
@@ -764,34 +845,40 @@ pub fn define_cocoa_view_class()->*const Class{
         }
     }
 
-    extern fn mouse_down(this: &Object, _sel: Sel, _event: id) {
+    extern fn mouse_down(this: &Object, _sel: Sel, event: id) {
         let cw = get_cocoa_window(this);
-        cw.send_finger_down(0);
+        let modifiers = get_event_key_modifier(event);
+        cw.send_finger_down(0, modifiers);
     }
 
-    extern fn mouse_up(this: &Object, _sel: Sel, _event: id) {
+    extern fn mouse_up(this: &Object, _sel: Sel, event: id) {
         let cw = get_cocoa_window(this);
-        cw.send_finger_up(0);
+        let modifiers = get_event_key_modifier(event);
+        cw.send_finger_up(0, modifiers);
     }
 
-    extern fn right_mouse_down(this: &Object, _sel: Sel, _event: id) {
+    extern fn right_mouse_down(this: &Object, _sel: Sel, event: id) {
         let cw = get_cocoa_window(this);
-        cw.send_finger_down(1);
+        let modifiers = get_event_key_modifier(event);
+        cw.send_finger_down(1, modifiers);
     }
 
-    extern fn right_mouse_up(this: &Object, _sel: Sel, _event: id) {
+    extern fn right_mouse_up(this: &Object, _sel: Sel, event: id) {
         let cw = get_cocoa_window(this);
-        cw.send_finger_up(1);
+        let modifiers = get_event_key_modifier(event);
+        cw.send_finger_up(1, modifiers);
     }
 
-    extern fn other_mouse_down(this: &Object, _sel: Sel, _event: id) {
+    extern fn other_mouse_down(this: &Object, _sel: Sel, event: id) {
         let cw = get_cocoa_window(this);
-        cw.send_finger_down(2);
+        let modifiers = get_event_key_modifier(event);
+        cw.send_finger_down(2, modifiers);
     }
 
-    extern fn other_mouse_up(this: &Object, _sel: Sel, _event: id) {
+    extern fn other_mouse_up(this: &Object, _sel: Sel, event: id) {
         let cw = get_cocoa_window(this);
-        cw.send_finger_up(2);
+        let modifiers = get_event_key_modifier(event);
+        cw.send_finger_up(2, modifiers);
     }
 
     fn mouse_pos_from_event(this: &Object, event: id)->Vec2{
@@ -801,14 +888,15 @@ pub fn define_cocoa_view_class()->*const Class{
             let window_point = event.locationInWindow();
             let view_point = view.convertPoint_fromView_(window_point, nil);
             let view_rect = NSView::frame(view);
-            vec2(view_point.x as f32, view_rect.size.height as f32 - view_point.y as f32)
+            Vec2{x:view_point.x as f32, y:view_rect.size.height as f32 - view_point.y as f32}
         }
     }
 
     fn mouse_motion(this: &Object, event: id) {
         let cw = get_cocoa_window(this);
         let pos = mouse_pos_from_event(this, event);
-        cw.send_finger_hover_and_move(pos);
+        let modifiers = get_event_key_modifier(event);
+        cw.send_finger_hover_and_move(pos, modifiers);
     }
 
     extern fn mouse_moved(this: &Object, _sel: Sel, event: id) {
@@ -934,16 +1022,19 @@ pub fn define_cocoa_view_class()->*const Class{
 
     extern fn first_rect_for_character_range(this: &Object, _sel: Sel, _range: NSRange, _actual_range: *mut c_void) -> NSRect {
         let cw = get_cocoa_window(this);
-        unsafe{ 
-            //let view: id = this as *const _ as *mut _;
-            //let view_rect = NSView::frame(view);
-            //println!("{} {}", view_rect.origin.x + cw.ime_spot.x as f64, view_rect.size.height - cw.ime_spot.y as f64);
-            let origin = cw.get_position();
-            NSRect::new(
-                NSPoint::new((origin.x + cw.ime_spot.x) as f64, (origin.y + cw.ime_spot.y) as f64),// as _, y as _),
-                NSSize::new(0.0, 0.0),
-            )
-        }
+
+        let view: id = this as *const _ as *mut _;
+        //let window_point = event.locationInWindow();
+        //et view_point = view.convertPoint_fromView_(window_point, nil);
+        let view_rect = unsafe{NSView::frame(view)};
+        let window_rect = unsafe{NSWindow::frame(cw.window.unwrap())};
+
+        let origin = cw.get_position();
+        let bar = (window_rect.size.height - view_rect.size.height) as f32 - 5.;
+        NSRect::new(
+            NSPoint::new((origin.x + cw.ime_spot.x) as f64, (origin.y + (view_rect.size.height as f32 - cw.ime_spot.y - bar)) as f64),// as _, y as _),
+            NSSize::new(0.0, 0.0),
+        )
     }
 
     extern fn insert_text(this: &Object, _sel: Sel, string: id, replacement_range: NSRange) {
@@ -955,11 +1046,7 @@ pub fn define_cocoa_view_class()->*const Class{
             } else {
                 string
             };
-            let slice = std::slice::from_raw_parts(
-                characters.UTF8String() as *const std::os::raw::c_uchar,
-                characters.len(),
-            );
-            let string = std::str::from_utf8_unchecked(slice).to_owned();
+            let string = nsstring_to_string(characters);
             cw.send_text_input(string, replacement_range.length != 0);
             let input_context: id = msg_send![this, inputContext];
             msg_send![input_context, invalidateCharacterCoordinates];
@@ -971,7 +1058,6 @@ pub fn define_cocoa_view_class()->*const Class{
 
     extern fn do_command_by_selector(this: &Object, _sel: Sel, _command: Sel) {
         let _cw = get_cocoa_window(this);
-        println!("do_command_by_selector");
     }
 
     extern fn key_down(this: &Object, _sel: Sel, event: id) {
@@ -979,6 +1065,7 @@ pub fn define_cocoa_view_class()->*const Class{
         unsafe{
             let input_context: id = msg_send![this, inputContext];
             msg_send![input_context, handleEvent:event];
+            //println!("HERE {} ",ret as u32);
             //let is_repeat:bool = msg_send![event, isARepeat];
             //if !is_repeat{
             //    let array: id = msg_send![class!(NSArray), arrayWithObject:event];
@@ -1183,6 +1270,16 @@ fn load_webkit_cursor(cursor_name_str: &str) -> id {
         msg_send![cursor, initWithImage:image hotSpot:point]
     }
 }
+
+unsafe fn nsstring_to_string(string:id)->String{
+    let slice = std::slice::from_raw_parts(
+        string.UTF8String() as *const std::os::raw::c_uchar,
+        string.len(),
+    );
+    std::str::from_utf8_unchecked(slice).to_owned()
+}
+
+
 
 
 #[repr(C)]

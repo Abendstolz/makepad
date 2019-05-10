@@ -5,6 +5,7 @@ pub use crate::shadergen::*;
 pub use crate::cx_fonts::*;
 pub use crate::cx_turtle::*;
 pub use crate::cx_cursor::*;
+pub use crate::cx_drawlist::*;
 pub use crate::math::*;
 pub use crate::events::*;
 pub use crate::shader::*;
@@ -19,12 +20,14 @@ pub use crate::cx_ogl::*;
 
 #[cfg(feature = "mtl")]
 pub use crate::cx_mtl::*; 
+#[cfg(feature = "mtl")]
+pub use crate::cx_mtlsl::*; 
 
 #[cfg(feature = "webgl")]
 pub use crate::cx_webgl::*; 
 
 #[cfg(any(feature = "webgl", feature = "ogl"))]
-pub use crate::cx_gl::*; 
+pub use crate::cx_glsl::*; 
 
 #[cfg(any(feature = "ogl", feature="mtl"))]
 pub use crate::cx_desktop::*; 
@@ -50,8 +53,9 @@ pub struct Cx{
     pub redraw_areas:Vec<Area>,
     pub incr_areas:Vec<Area>,
     pub paint_dirty:bool,
-    pub clear_color:Vec4,
+    pub clear_color:Color,
     pub redraw_id: u64,
+    pub repaint_id: u64,
     pub event_id: u64,
     pub is_in_redraw_cycle:bool,
 
@@ -68,11 +72,15 @@ pub struct Cx{
     pub down_mouse_cursor:Option<MouseCursor>,
     pub hover_mouse_cursor:Option<MouseCursor>,
     pub captured_fingers:Vec<Area>,
+    pub finger_tap_count:Vec<(Vec2,f64,u32)>,
 
     pub user_events:Vec<Event>,
 
     pub playing_anim_areas:Vec<AnimArea>,
     pub ended_anim_areas:Vec<AnimArea>,
+
+    pub frame_callbacks:Vec<Area>,
+    pub next_frame_callbacks:Vec<Area>,
 
     pub platform:CxPlatform,
 
@@ -86,9 +94,10 @@ impl Default for Cx{
         let mut uniforms = Vec::<f32>::new();
         uniforms.resize(CX_UNI_SIZE, 0.0);
         let mut captured_fingers = Vec::new();
-
+        let mut finger_tap_count = Vec::new();
         for _i in 0..10{
             captured_fingers.push(Area::Empty);
+            finger_tap_count.push((Vec2::zero(),0.0,0));
         }
 
         Self{
@@ -111,13 +120,16 @@ impl Default for Cx{
             redraw_areas:Vec::new(),
             incr_areas:Vec::new(),
             paint_dirty:false,
-            clear_color:vec4(0.1,0.1,0.1,1.0),
+            clear_color:Color{r:0.1, g:0.1, b:0.1, a:1.0},
+
             redraw_id:1,
             event_id:1,
+            repaint_id:1,
+    
             is_in_redraw_cycle:false,
             turtles:Vec::new(),
             align_list:Vec::new(),
-            target_size:vec2(0.0,0.0),
+            target_size:Vec2::zero(),
             target_dpi_factor:0.0,
             
             last_key_focus:Area::Empty,
@@ -128,6 +140,7 @@ impl Default for Cx{
             down_mouse_cursor:None,
             hover_mouse_cursor:None,
             captured_fingers:captured_fingers,
+            finger_tap_count:finger_tap_count,
 
             user_events:Vec::new(),
 
@@ -135,6 +148,9 @@ impl Default for Cx{
 
             playing_anim_areas:Vec::new(),
             ended_anim_areas:Vec::new(),
+
+            frame_callbacks:Vec::new(),
+            next_frame_callbacks:Vec::new(),
 
             platform:CxPlatform{..Default::default()},
 
@@ -170,6 +186,22 @@ impl Cx{
             });
         }
         *store_id
+    }
+
+    pub fn process_tap_count(&mut self, digit:usize, pos:Vec2, time:f64)->u32{
+        if digit >= self.finger_tap_count.len(){
+            return 0
+        };
+        let (last_pos, last_time, count) = self.finger_tap_count[digit];
+
+        if (time - last_time) < 0.5 && pos.distance(&last_pos) < 10.{
+            self.finger_tap_count[digit] = (pos, time, count + 1);
+            count + 1
+        }
+        else{
+            self.finger_tap_count[digit] = (pos, time, 1);
+            1
+        }
     }
 
     pub fn def_uniforms(sh: &mut Shader){
@@ -248,96 +280,26 @@ impl Cx{
         }
     }
 
-    pub fn new_aligned_instance(&mut self, shader_id:usize)->AlignedInstance{
-        let instance_area = self.new_instance(shader_id);
-        let align_index = self.align_list.len();
-        self.align_list.push(Area::Instance(instance_area.clone()));
-        AlignedInstance{
-            inst:instance_area,
-            index:align_index
+    pub fn update_area_refs(&mut self, old_area:Area, new_area:Area){
+         // alright first we find area, it already exists
+        if let Some(anim_anim) = self.playing_anim_areas.iter_mut().find(|v| v.area == old_area){
+            anim_anim.area = new_area.clone()
+        }
+        //Update mouse capture areas
+        if let Some(digit_area) = self.captured_fingers.iter_mut().find(|v| **v == old_area){
+            *digit_area = new_area.clone()
+        }
+        // update capture keyboard
+        if self.key_focus == old_area{
+            self.key_focus = new_area.clone()
+        }
+        //
+        if let Some(next_frame) = self.next_frame_callbacks.iter_mut().find(|v| **v == old_area){
+            *next_frame = new_area.clone()
         }
     }
 
-    pub fn update_aligned_instance_count(&mut self,align:&AlignedInstance){
-        if let Area::Instance(instance) = &mut self.align_list[align.index]{
-            instance.instance_count = align.inst.instance_count;
-        }
-    }
-/*
-    fn draw_call_to_area(dc:&DrawCall)->Area{
-        Area::Instance(InstanceArea{
-            draw_list_id:dc.draw_list_id,
-            draw_call_id:dc.draw_call_id,
-            redraw_id:dc.
-            instance_offset:dc.current_instance_offset,
-            instance_count:1
-        })
-    }*/
-
-    pub fn new_instance(&mut self, shader_id:usize)->InstanceArea{
-        if !self.is_in_redraw_cycle{
-            panic!("calling get_instance outside of redraw cycle is not possible!");
-        }
-
-        let sh = &self.compiled_shaders[shader_id];
-        let draw_list = &mut self.draw_lists[self.current_draw_list_id];
-        
-        // find our drawcall in the filled draws
-        for i in (0..draw_list.draw_calls_len).rev(){
-            let dc = &mut draw_list.draw_calls[i];
-            if dc.sub_list_id == 0 && dc.shader_id == sh.shader_id{
-                // reuse this drawcmd and add an instance
-                dc.current_instance_offset = dc.instance.len();
-                let slot_align = dc.instance.len() % sh.instance_slots;
-                if slot_align != 0{
-                    panic!("Instance offset disaligned! shader: {} misalign: {} slots: {}", shader_id, slot_align, sh.instance_slots);
-                }
-                dc.need_uniforms_now = false;
-                
-                return dc.get_current_instance_area();
-            }
-        }
-
-        // we need a new draw
-        let draw_call_id = draw_list.draw_calls_len;
-        draw_list.draw_calls_len = draw_list.draw_calls_len + 1;
-        
-        // see if we need to add a new one
-        if draw_call_id >= draw_list.draw_calls.len(){
-            draw_list.draw_calls.push(DrawCall{
-                draw_call_id:draw_call_id,
-                draw_list_id:self.current_draw_list_id,
-                redraw_id:self.redraw_id,
-                sub_list_id:0,
-                shader_id:sh.shader_id,
-                instance:Vec::new(),
-                uniforms:Vec::new(),
-                textures_2d:Vec::new(),
-                current_instance_offset:0,
-                need_uniforms_now:true,
-                instance_dirty:true,
-                platform:DrawCallPlatform{..Default::default()}
-            });
-            let dc = &mut draw_list.draw_calls[draw_call_id];
-            return dc.get_current_instance_area();
-        }
-
-        // reuse a draw
-        let dc = &mut draw_list.draw_calls[draw_call_id];
-        dc.shader_id = sh.shader_id;
-        dc.sub_list_id = 0; // make sure its recognised as a draw call
-        // truncate buffers and set update frame
-        dc.redraw_id = self.redraw_id;
-        dc.instance.truncate(0);
-        dc.current_instance_offset = 0;
-        dc.uniforms.truncate(0);
-        dc.textures_2d.truncate(0);
-        dc.instance_dirty = true;
-        dc.need_uniforms_now = true;
-        return dc.get_current_instance_area();
-    }
-
-    pub fn color(&self, name:&str)->Vec4{
+    pub fn color(&self, name:&str)->Color{
         if let Some(StyleValue::Color(val)) = self.style_values.get(name){
             return *val;
         }
@@ -358,7 +320,7 @@ impl Cx{
         panic!("Cannot find style size key {}", name);
     }
 
-    pub fn set_color(&mut self, name:&str, val:Vec4){
+    pub fn set_color(&mut self, name:&str, val:Color){
         self.style_values.insert(name.to_string(), StyleValue::Color(val));
     }
 
@@ -421,13 +383,28 @@ impl Cx{
     pub fn call_animation_event<F>(&mut self, mut event_handler:F, time:f64)
     where F: FnMut(&mut Cx, &mut Event)
     { 
-        self.call_event_handler(&mut event_handler, &mut Event::Animate(AnimateEvent{time:time}));
+        self.call_event_handler(&mut event_handler, &mut Event::Animate(AnimateEvent{time:time, frame:self.repaint_id}));
         self.check_ended_anim_areas(time);
         if self.ended_anim_areas.len() > 0{
-            self.call_event_handler(&mut event_handler, &mut Event::AnimationEnded(AnimateEvent{time:time}));
+            self.call_event_handler(&mut event_handler, &mut Event::AnimationEnded(AnimateEvent{time:time, frame:self.repaint_id}));
         }
     }
 
+    pub fn call_frame_event<F>(&mut self, mut event_handler:F, time:f64)
+    where F: FnMut(&mut Cx, &mut Event)
+    { 
+        self.frame_callbacks = self.next_frame_callbacks.clone();
+        self.next_frame_callbacks.truncate(0);
+        self.call_event_handler(&mut event_handler, &mut Event::Frame(FrameEvent{time:time, frame:self.repaint_id}));
+    }
+
+    pub fn next_frame(&mut self, area:Area){
+        if let Some(_) = self.next_frame_callbacks.iter().position(|a| *a == area){
+            return;
+        }
+        self.next_frame_callbacks.push(area);
+    }
+/*
     pub fn debug_draw_tree_recur(&mut self, draw_list_id: usize, depth:usize){
         if draw_list_id >= self.draw_lists.len(){
             println!("---------- Drawlist still empty ---------");
@@ -487,207 +464,21 @@ impl Cx{
         if draw_list_id == 0{
             println!("---------- End Debug draw tree for redraw_id: {} ---------", self.redraw_id)
         }
-    }
+    }*/
 }
 
-#[derive(Clone)]
-pub struct AlignedInstance{
-    pub inst:InstanceArea,
-    pub index:usize
-}
 
 #[derive(Clone)]
 pub enum StyleValue{
-    Color(Vec4),
+    Color(Color),
     Font(String),
     Size(f64)
-}
-
-#[derive(Default,Clone)]
-pub struct DrawCall{
-    pub draw_call_id:usize,
-    pub draw_list_id:usize,
-    pub redraw_id:u64,
-    pub sub_list_id:usize, // if not 0, its a subnode
-    pub shader_id:usize, // if shader_id changed, delete gl vao
-    pub instance:Vec<f32>,
-    pub current_instance_offset:usize, // offset of current instance
-    pub uniforms:Vec<f32>,  // draw uniforms
-    pub textures_2d:Vec<u32>,
-    pub instance_dirty:bool,
-    pub platform:DrawCallPlatform,
-    pub need_uniforms_now:bool
-}
-
-impl DrawCall{
-
-    pub fn get_current_instance_area(&self)->InstanceArea{
-        InstanceArea{
-            draw_list_id:self.draw_list_id,
-            draw_call_id:self.draw_call_id,
-            redraw_id:self.redraw_id,
-            instance_offset:self.current_instance_offset,
-            instance_count:1
-        }
-    }
-}
-
-// CX and DL uniforms
-const DL_UNI_SCROLL:usize = 0;
-const DL_UNI_CLIP:usize = 2;
-const DL_UNI_SIZE:usize = 6;
-
-#[derive(Default,Clone)]
-pub struct DrawList{
-    pub nesting_draw_list_id:usize, // the id of the parent we nest in, codeflow wise
-    pub redraw_id:u64,
-    pub draw_calls:Vec<DrawCall>,
-    pub draw_calls_len: usize,
-    pub uniforms:Vec<f32>, // cmdlist uniforms
-    pub platform:DrawListPlatform,
-    pub rect:Rect,
-    pub clipped:bool
-}
-
-impl DrawList{
-    pub fn initialize(&mut self, clipped:bool, redraw_id:u64){
-        self.clipped = clipped;
-        self.redraw_id = redraw_id;
-        self.uniforms.resize(DL_UNI_SIZE, 0.0);
-    }
-
-    pub fn set_clipping_uniforms(&mut self){
-        if self.clipped{
-            //println!("SET CLIPPING {} {} {} {} {}", self.draw_list_id, self.rect.x, self.rect.y, self.rect.x+self.rect.w, self.rect.y+self.rect.h);
-            self.uniform_draw_list_clip(self.rect.x, self.rect.y, self.rect.x+self.rect.w, self.rect.y+self.rect.h);
-        }
-        else{
-            self.uniform_draw_list_clip(-50000.0,-50000.0,50000.0,50000.0);
-        }
-    }
-
-    pub fn def_uniforms(sh:&mut Shader){
-        sh.add_ast(shader_ast!({
-            let draw_list_scroll:vec2<UniformDl>;
-            let draw_list_clip:vec4<UniformDl>;
-        }));
-    }
-
-    pub fn set_scroll_x(&mut self, x:f32){
-        self.uniforms[DL_UNI_SCROLL+0] = x;
-    }
-
-    pub fn set_scroll_y(&mut self, y:f32){
-        self.uniforms[DL_UNI_SCROLL+1] = y;
-    }
-
-    pub fn get_scroll(&self)->Vec2{
-        return vec2(self.uniforms[DL_UNI_SCROLL+0],self.uniforms[DL_UNI_SCROLL+1])
-    }
-
-    pub fn clip_and_scroll_rect(&self, x:f32, y:f32, w:f32, h:f32)->Rect{
-        let mut x1 = x - self.uniforms[DL_UNI_SCROLL+0];
-        let mut y1 = y - self.uniforms[DL_UNI_SCROLL+1];
-        let mut x2 = x1 + w;
-        let mut y2 = y1 + h; 
-        let min_x = self.uniforms[DL_UNI_CLIP+0];
-        let min_y = self.uniforms[DL_UNI_CLIP+1];
-        let max_x = self.uniforms[DL_UNI_CLIP+2];
-        let max_y = self.uniforms[DL_UNI_CLIP+3];
-        x1 = min_x.max(x1).min(max_x);
-        y1 = min_y.max(y1).min(max_y);
-        x2 = min_x.max(x2).min(max_x);
-        y2 = min_y.max(y2).min(max_y);
-        return Rect{x:x1, y:y1, w:x2-x1, h:y2-y1};
-    }
-
-    pub fn uniform_draw_list_clip(&mut self, min_x:f32, min_y:f32, max_x:f32, max_y:f32){
-        
-        self.uniforms[DL_UNI_CLIP+0] = min_x;
-        self.uniforms[DL_UNI_CLIP+1] = min_y;
-        self.uniforms[DL_UNI_CLIP+2] = max_x;
-        self.uniforms[DL_UNI_CLIP+3] = max_y;
-    }
 }
 
 pub trait Style{
     fn style(cx:&mut Cx) -> Self;
 }
 
-#[derive(Clone)]
-pub struct BinaryDep{
-    pub name:String,
-    pub vec_obj:Vec<u8>,
-    pub parse:isize
-}
-
-impl BinaryDep{
-    pub fn new_from_vec(name:String, vec_obj:Vec<u8>)->BinaryDep{
-        BinaryDep{
-            name:name, 
-            vec_obj:vec_obj,
-            parse:0
-        }
-    }
-
-    pub fn u8(&mut self)->Result<u8, String>{
-        if self.parse + 1 > self.vec_obj.len() as isize{
-            return Err(format!("Eof on u8 file {} offset {}", self.name, self.parse))
-        }
-        unsafe{
-            let ret = (self.vec_obj.as_ptr().offset(self.parse) as *const u8).read();
-            self.parse += 1;
-            Ok(ret)
-        }
-    }
-
-    pub fn u16(&mut self)->Result<u16, String>{
-        if self.parse+2 > self.vec_obj.len() as isize{
-            return Err(format!("Eof on u16 file {} offset {}", self.name, self.parse))
-        }
-        unsafe{
-            let ret = (self.vec_obj.as_ptr().offset(self.parse) as *const u16).read();
-            self.parse += 2;
-            Ok(ret)
-        }
-    }
-
-    pub fn u32(&mut self)->Result<u32, String>{
-        if self.parse+4 > self.vec_obj.len() as isize{
-            return Err(format!("Eof on u32 file {} offset {}", self.name, self.parse))
-        }
-        unsafe{
-            let ret = (self.vec_obj.as_ptr().offset(self.parse) as *const u32).read();
-            self.parse += 4;
-            Ok(ret)
-        }
-    }
-
-    pub fn f32(&mut self)->Result<f32, String>{
-        if self.parse+4 > self.vec_obj.len() as isize{
-            return Err(format!("Eof on f32 file {} offset {}", self.name, self.parse))
-        }
-        unsafe{
-            let ret = (self.vec_obj.as_ptr().offset(self.parse) as *const f32).read();
-            self.parse += 4;
-            Ok(ret)
-        }
-    }
-
-    pub fn read(&mut self, out:&mut [u8])->Result<usize, String>{
-        let len = out.len();
-        if self.parse + len as isize > self.vec_obj.len() as isize{
-             return Err(format!("Eof on read file {} len {} offset {}", self.name, out.len(), self.parse));
-        };
-        //unsafe{
-            for i in 0..len{
-                out[i] = self.vec_obj[self.parse as usize + i];
-            };
-            self.parse += len as isize;
-        //}
-        Ok(len)
-    }
-}
 
 #[macro_export]
 macro_rules! log {

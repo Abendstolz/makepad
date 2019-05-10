@@ -1,3 +1,5 @@
+//use syn::Type;
+
 use widgets::*;
 use std::collections::HashMap;
 
@@ -10,7 +12,7 @@ pub use crate::rusteditor::*;
 
 #[derive(Clone)]
 enum Panel{
-    Color(Vec4),
+    Color(Color), 
     FileTree,
     FileEditorTarget,
     FileEditor{path:String, editor_id:u64}
@@ -29,7 +31,7 @@ struct App{
     quad:Quad
 }
 
-main_app!(App, "My App!");
+main_app!(App, "Makepad");
  
 impl Style for App{
     fn style(cx:&mut Cx)->Self{
@@ -85,8 +87,8 @@ impl Style for App{
                                 },
                                 DockTab{
                                     closeable:true,
-                                    title:"button.rs".to_string(),
-                                    item:Panel::FileEditor{path:"/widgets/src/button.rs".to_string(), editor_id:1}
+                                    title:"example.rs".to_string(),
+                                    item:Panel::FileEditor{path:"/src/example.rs".to_string(), editor_id:1}
                                 }
                             ],
                         }),
@@ -201,8 +203,8 @@ impl App{
 
     fn draw_app(&mut self, cx:&mut Cx){
         
-       // use syn::{Expr, Result};
-
+        //use syn::{Expr, Result};
+        //let t:Result<Expr> = syn::parse_str("std::collections::HashMap<String, Value>");
         //cx.debug_area = Area::Instance(InstanceArea{draw_list_id:0,draw_call_id:0,instance_offset:0,instance_count:0,redraw_id:0});
 
         self.view.begin_view(cx, &Layout{..Default::default()});

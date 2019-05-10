@@ -1,7 +1,10 @@
 (function(root){
 	var user_agent = window.navigator.userAgent;
 	var is_mobile_safari = user_agent.match(/Mobile\/\w+ Safari/i);
+	var is_android = user_agent.match(/Android/i);
 	var is_add_to_homescreen_safari = is_mobile_safari && navigator.standalone;
+	var is_touch_device = ('ontouchstart' in window || navigator.maxTouchPoints);
+	var is_firefox = navigator.userAgent.toLowerCase().indexOf('firefox') > -1;
 	// message we can send to wasm
 	class ToWasm{
 		constructor(wasm_app){
@@ -50,6 +53,18 @@
 			}
 		}
 
+		send_f64(value){
+			if(this.used&1){ // float64 align, need to fit another
+				var pos = this.fit(3);
+				pos++;
+				this.mf64[pos>>1] = value;
+			}
+			else{
+				var pos = this.fit(2);
+				this.mf64[pos>>1] = value;
+			}
+		}
+
 		deps_loaded(deps){
 			let pos = this.fit(2);
 			this.mu32[pos++] = 2
@@ -80,71 +95,113 @@
 		}
 
 		animation_frame(time){
-			let pos = this.fit(3); // float64 uses 2 slots
+			let pos = this.fit(1); // float64 uses 2 slots
 			this.mu32[pos++] = 5;
-			if(pos&1){ // float64 align, need to fit another
-				pos++;
-				this.fit(1);
-			}
-			this.mf64[pos>>1] = time;
+			this.send_f64(time);
 		}
 
-		on_finger_down(finger){
-			let pos = this.fit(5);
+		finger_down(finger){
+			let pos = this.fit(6);
 			this.mu32[pos++] = 6;
 			this.mf32[pos++] = finger.x
 			this.mf32[pos++] = finger.y
 			this.mu32[pos++] = finger.digit
 			this.mu32[pos++] = finger.touch?1:0
+			this.mu32[pos++] = finger.modifiers
+			this.send_f64(finger.time);
 		}
 
-		on_finger_up(finger){
-			let pos = this.fit(5);
+		finger_up(finger){
+			let pos = this.fit(6);
 			this.mu32[pos++] = 7;
 			this.mf32[pos++] = finger.x
 			this.mf32[pos++] = finger.y
 			this.mu32[pos++] = finger.digit
 			this.mu32[pos++] = finger.touch?1:0
+			this.mu32[pos++] = finger.modifiers
+			this.send_f64(finger.time);
 		}
-
-		on_finger_move(finger){
-			let pos = this.fit(5);
+		
+		finger_move(finger){
+			let pos = this.fit(6);
 			this.mu32[pos++] = 8;
 			this.mf32[pos++] = finger.x
 			this.mf32[pos++] = finger.y
 			this.mu32[pos++] = finger.digit
 			this.mu32[pos++] = finger.touch?1:0
+			this.mu32[pos++] = finger.modifiers
+			this.send_f64(finger.time);
 		}
 
-		on_finger_hover(finger){
-			let pos = this.fit(3);
+		finger_hover(finger){
+			let pos = this.fit(4);
 			this.mu32[pos++] = 9;
 			this.mf32[pos++] = finger.x
 			this.mf32[pos++] = finger.y
+			this.mu32[pos++] = finger.modifiers
+			this.send_f64(finger.time);
 		}
 		
-		on_finger_wheel(finger){
-			let pos = this.fit(5);
+		finger_scroll(finger){
+			let pos = this.fit(7);
 			this.mu32[pos++] = 10;
 			this.mf32[pos++] = finger.x
 			this.mf32[pos++] = finger.y
-			this.mf32[pos++] = finger.x_wheel
-			this.mf32[pos++] = finger.y_wheel
+			this.mf32[pos++] = finger.scroll_x
+			this.mf32[pos++] = finger.scroll_y
+			this.mu32[pos++] = finger.is_wheel?1:0
+			this.mu32[pos++] = finger.modifiers
+			this.send_f64(finger.time);
 		}
 
-		on_finger_out(x, y){
-			let pos = this.fit(3);
+		finger_out(finger){
+			let pos = this.fit(4);
 			this.mu32[pos++] = 11;
-			this.mf32[pos++] = x
-			this.mf32[pos++] = y
+			this.mf32[pos++] = finger.x
+			this.mf32[pos++] = finger.y
+			this.mu32[pos++] = finger.modifiers
+			this.send_f64(finger.time);
+		}
+
+		key_down(key){
+			let pos = this.fit(5);
+			this.mu32[pos++] = 12;
+			this.mu32[pos++] = key.key_code;
+			this.mu32[pos++] = key.char_code;
+			this.mu32[pos++] = key.is_repeat?1:0;
+			this.mu32[pos++] = key.modifiers;
+			this.send_f64(key.time);
+		}
+
+		key_up(key){
+			let pos = this.fit(5);
+			this.mu32[pos++] = 13;
+			this.mu32[pos++] = key.key_code;
+			this.mu32[pos++] = key.char_code;
+			this.mu32[pos++] = key.is_repeat?1:0;
+			this.mu32[pos++] = key.modifiers;
+			this.send_f64(key.time);
+		}
+
+		text_input(data){
+			let pos = this.fit(3);
+			this.mu32[pos++] = 14;
+			this.mu32[pos++] = data.was_paste?1:0,
+			this.mu32[pos++] = data.replace_last?1:0,
+			this.send_string(data.input);
 		}
 
 		read_file_data(id, buf_ptr, buf_len){
 			let pos = this.fit(4);
-			this.mu32[pos++] = 12;
+			this.mu32[pos++] = 15;
 			this.mu32[pos++] = id;
 			this.mu32[pos++] = buf_ptr;
 			this.mu32[pos++] = buf_len;
+		}
+
+		text_copy(){
+			let pos = this.fit(1);
+			this.mu32[pos++] = 16;
 		}
 
 		end(){
@@ -169,10 +226,10 @@
 			this.textures = [];
 			this.resources = [];
 			this.req_anim_frame_id = 0;
-
+			this.text_copy_response = "";
 			this.init_webgl_context();
 			this.bind_mouse_and_touch();
-
+			this.bind_keyboard();
 			// lets create the wasm app and cx
 			this.app = this.exports.create_wasm_app();
 			
@@ -212,6 +269,12 @@
 				})
 				this.do_wasm_block = false;
 				this.do_wasm_io();
+
+				var loaders =	document.getElementsByClassName('cx_webgl_loader');
+				for(var i = 0; i < loaders.length; i++){
+					loaders[i].parentNode.removeChild(loaders[i])
+				}	
+
 			})
 		}
 
@@ -252,7 +315,9 @@
 			this.req_anim_frame_id = window.requestAnimationFrame(time=>{
 				this.req_anim_frame_id = 0;
 				this.to_wasm.animation_frame(time / 1000.0);
+				this.in_animation_frame = true;
 				this.do_wasm_io();
+				this.in_animation_frame = false;
 			})
 		}
 
@@ -484,54 +549,6 @@
 		set_document_title(title){
 			document.title = title
 		}
-
-		on_finger_down(fingers){
-			for(let i = 0; i < fingers.length; i++){
-				var finger = fingers[i]	
-					this.to_wasm.on_finger_down(finger)
-			}
-
-			//this.do_wasm_io();
-		}
-
-		on_finger_up(fingers){
-			for(let i = 0; i < fingers.length; i++){
-				var finger = fingers[i]
-				this.to_wasm.on_finger_up(finger)
-			}
-
-			//this.do_wasm_io();
-		}
-
-		on_finger_hover(fingers){
-			for(let i = 0; i < fingers.length; i++){
-				var finger = fingers[i]
-				this.to_wasm.on_finger_hover(finger);
-			}			
-
-			//this.do_wasm_io();
-		}
-
-		on_finger_move(fingers){
-			for(let i = 0; i < fingers.length; i++){
-				var finger = fingers[i]
-				this.to_wasm.on_finger_move(finger);
-			}
-			//this.do_wasm_io();
-		}
-
-		on_finger_wheel(fingers){
-			for(let i = 0; i < fingers.length; i++){
-				var finger = fingers[i]
-				this.to_wasm.on_finger_wheel(finger)
-			}
-			//this.do_wasm_io();
-		}
-
-		on_finger_out(x, y){
-			this.to_wasm.on_finger_out(x, y);
-			//this.do_wasm_io();
-		}
 		
 		bind_mouse_and_touch(){
 			
@@ -576,12 +593,14 @@
 
 			var canvas = this.canvas
 			function mouse_to_finger(e){
-				return [{
+				return {
 					x:e.pageX,
 					y:e.pageY,
 					digit: e.button,
+					time:e.timeStamp/ 1000.0,
+					modifiers:pack_key_modifier(e),
 					touch: false
-				}]
+				}
 			}
 
 			var digit_map = {}
@@ -607,6 +626,8 @@
 						x:t.pageX,
 						y:t.pageY,
 						digit:digit,
+						time:e.timeStamp/ 1000.0,
+						modifiers:0,
 						touch: true,
 					})
 				}
@@ -631,6 +652,8 @@
 						x:t.pageX,
 						y:t.pageY,
 						digit:lookup_digit(t.identifier),
+						time:e.timeStamp/ 1000.0,
+						modifiers:{},
 						touch: true,
 					})
 				}
@@ -653,7 +676,9 @@
 					f.push({
 						x:t.pageX,
 						y:t.pageY,
+						time:e.timeStamp / 1000.0,
 						digit:digit,
+						modifiers:0,
 						touch: true,
 					})
 				}
@@ -663,29 +688,30 @@
 			var mouse_buttons_down = [];
 			canvas.addEventListener('mousedown',e=>{
 				e.preventDefault();
+				this.focus_keyboard_input();
 				mouse_buttons_down[e.button] = true;
-				this.on_finger_down(mouse_to_finger(e))
+				this.to_wasm.finger_down(mouse_to_finger(e))
 				this.do_wasm_io();
 			})
 			window.addEventListener('mouseup',e=>{
 				e.preventDefault();
 				mouse_buttons_down[e.button] = false;
-				this.on_finger_up(mouse_to_finger(e));
+				this.to_wasm.finger_up(mouse_to_finger(e))
 				this.do_wasm_io();
 			})
 			let mouse_move = e=>{
-				let move_fingers = [];
 				for(var i = 0; i < mouse_buttons_down.length; i++){
 					if(mouse_buttons_down[i]){
-						move_fingers.push({
+						this.to_wasm.finger_move({
 							x:e.pageX,
 							y:e.pageY,
+							time:e.timeStamp/ 1000.0,
+							modifiers:0,
 							digit:i
 						})
 					}
 				}
-				this.on_finger_move(move_fingers);
-				this.on_finger_hover(mouse_to_finger(e));
+				this.to_wasm.finger_hover(mouse_to_finger(e));
 				var begin = performance.now();
 				this.do_wasm_io();
 				var end = performance.now();
@@ -693,7 +719,7 @@
 			}
 			window.addEventListener('mousemove',mouse_move);
 			window.addEventListener('mouseout',e=>{
-				this.on_finger_out(e.pageX, e.pageY);
+				this.to_wasm.finger_out(mouse_to_finger(e))//e.pageX, e.pageY, pa;
 				this.do_wasm_io();
 			});
 			canvas.addEventListener('contextmenu',e=>{
@@ -702,48 +728,267 @@
 			})
 			window.addEventListener('touchstart', e=>{
 				e.preventDefault()
-				this.on_finger_down(touch_to_finger_alloc(e))
+				let fingers = touch_to_finger_alloc(e);
+				for(let i = 0; i < fingers.length; i++){
+					this.to_wasm.finger_down(fingers[i])
+				}
 				this.do_wasm_io();
 				return false
 			})
 			window.addEventListener('touchmove',e=>{
 				e.preventDefault();
-				this.on_finger_move(touch_to_finger_lookup(e))
+				var fingers = touch_to_finger_lookup(e);
+				for(let i = 0; i < fingers.length; i++){
+					this.to_wasm.finger_move(fingers[i])
+				}
 				this.do_wasm_io();
 				return false
 			},{passive:false})
-			window.addEventListener('touchend', e=>{
+			var end_cancel_leave = e=>{
 				e.preventDefault();
-				this.on_finger_up(touch_to_finger_free(e))
+				var fingers = touch_to_finger_free(e);
+				for(let i = 0; i < fingers.length; i++){
+					this.to_wasm.finger_up(fingers[i])
+				}
 				this.do_wasm_io();
 				return false
-			})
-			canvas.addEventListener('touchcancel', e=>{
-				e.preventDefault();
-				this.on_finger_up(touch_to_finger_free(e))
-				this.do_wasm_io();
-				return false
-			})
-			canvas.addEventListener('touchleave', e=>{
-				e.preventDefault();
-				this.on_finger_up(touch_to_finger_free(e))
-				this.do_wasm_io();
-				return false
-			})
+			}
+			window.addEventListener('touchend', end_cancel_leave);
+			canvas.addEventListener('touchcancel', end_cancel_leave);
+			canvas.addEventListener('touchleave', end_cancel_leave);
+
+			var last_wheel_time;
+			var last_was_wheel;
+
 			canvas.addEventListener('wheel', e=>{
-				var fingers = mouse_to_finger(e)
+				var finger = mouse_to_finger(e)
 				e.preventDefault()
+				let delta = e.timeStamp-last_wheel_time;
+				last_wheel_time = e.timeStamp;
+				// typical web bullshit. this reliably detects mousewheel or touchpad on mac in safari
+				if(is_firefox){
+					last_was_wheel = e.deltaMode == 1
+				}
+				else{ // detect it
+					if(Math.abs(Math.abs((e.deltaY / e.wheelDeltaY)) - (1./3.)) < 0.00001 ||
+						!last_was_wheel && delta < 250){
+						last_was_wheel = false;
+					}
+					else{
+						last_was_wheel = true;
+					}
+				}
+				//console.log(e.deltaY / e.wheelDeltaY);
+				//last_delta = delta;
 				var fac = 1
 				if(e.deltaMode === 1) fac = 40
 				else if(e.deltaMode === 2) fac = window.offsetHeight
-		
-				fingers[0].x_wheel = e.deltaX * fac
-				fingers[0].y_wheel = e.deltaY * fac
-				this.on_finger_wheel(fingers)
+				finger.scroll_x = e.deltaX * fac
+				finger.scroll_y = e.deltaY * fac
+				finger.is_wheel = last_was_wheel;
+				this.to_wasm.finger_scroll(finger);
 				this.do_wasm_io();
 			})
 			//window.addEventListener('webkitmouseforcewillbegin', this.onCheckMacForce.bind(this), false)
 			//window.addEventListener('webkitmouseforcechanged', this.onCheckMacForce.bind(this), false)
+		}
+	
+		bind_keyboard(){
+			if(is_mobile_safari || is_android){ // mobile keyboards are unusable on a UI like this. Not happening.
+				return
+			}
+			var ta = this.text_area = document.createElement('textarea')
+			ta.className = "makepad"
+			ta.setAttribute('autocomplete','off')
+			ta.setAttribute('autocorrect','off')
+			ta.setAttribute('autocapitalize','off')
+			ta.setAttribute('spellcheck','false')
+			var style = document.createElement('style')
+			style.innerHTML = "\n\
+				textarea.makepad{\n\
+					z-index:100000;\n\
+					position:absolute;\n\
+					opacity: 0;\n\
+					border-radius:4px;\n\
+					color: white;\n\
+					font-size:6;\n\
+					background: gray;\n\
+					-moz-appearance: none;\n\
+					appearance: none;\n\
+					border: none;\n\
+					resize: none;\n\
+					outline: none;\n\
+					overflow: hidden;\n\
+					text-indent:0px;\n\
+					padding: 0 0px;\n\
+					margin: 0 -1px;\n\
+					text-indent: 0px;\n\
+					-ms-user-select: text;\n\
+					-moz-user-select: text;\n\
+					-webkit-user-select: text;\n\
+					user-select: text;\n\
+					white-space: pre!important;\n\
+					\n\
+				}\n\
+				textarea:focus.makepad{\n\
+					outline:0px !important;\n\
+					-webkit-appearance:none;\n\
+				}"
+			document.body.appendChild(style)
+			ta.style.left = -100
+			ta.style.top = -100
+			ta.style.height = 1
+			ta.style.width = 1
+
+			// make the IME not show up:
+			//ta.setAttribute('readonly','false')
+
+			//document.addEventListener('focusout', this.onFocusOut.bind(this))
+			var was_paste = false;
+			this.neutralize_ime = false;
+			var last_len = 0;
+			ta.addEventListener('cut', e=>{
+				setTimeout(_=>{
+					ta.value="";
+					last_len = 0;
+				},0)
+			})
+			ta.addEventListener('copy', e=>{
+				setTimeout(_=>{
+					ta.value="";
+					last_len = 0;
+				},0)
+			})
+			ta.addEventListener('paste', e=>{
+				was_paste = true;
+			})
+			ta.addEventListener('select', e=>{
+				
+			})
+
+			ta.addEventListener('input', e=>{
+				if(ta.value.length>0){
+					if(was_paste){
+						was_paste = false;
+
+						this.to_wasm.text_input({
+							was_paste:true,
+							input:ta.value.substring(last_len),
+							replace_last:false,
+						})
+						ta.value = "";
+					}
+					else{
+						var replace_last = false;
+						var text_value = ta.value;
+						if(ta.value.length >= 2){ // we want the second char
+							text_value = ta.value.substring(1,2);
+							ta.value = text_value;
+						}
+						else if(ta.value.length == 1 && last_len == ta.value.length){ // its an IME replace
+							replace_last = true;
+							
+						}
+						// we should send a replace last
+						this.to_wasm.text_input({
+							was_paste:false,
+							input:text_value,
+							replace_last:replace_last,
+						})						
+					}
+					this.do_wasm_io();
+				}
+				last_len = ta.value.length;
+			})
+			ta.addEventListener('touchmove', e=>{
+				
+			})
+			ta.addEventListener('blur', e=>{
+				this.focus_keyboard_input();
+			})
+
+			var ugly_ime_hack = false;
+
+			ta.addEventListener('keydown', e=>{
+				let code = e.keyCode;
+				
+				if(code == 91){firefox_logo_key = true; e.preventDefault();}
+				if(code == 18 || code == 17 || code == 16) e.preventDefault(); // alt
+				if(code === 8 || code === 9) e.preventDefault() // backspace/tab
+				if((code === 88 || code == 67) && (e.metaKey || e.ctrlKey) ){ // copy or cut
+					// we need to request the clipboard
+					this.to_wasm.text_copy();
+					this.do_wasm_io();
+					ta.value = this.text_copy_response;
+					ta.selectionStart = 0;
+					ta.selectionEnd = ta.value.length;
+				}
+				//	this.keyboardCut = true // x cut
+				//if(code === 65 && (e.metaKey || e.ctrlKey)) this.keyboardSelectAll = true	 // all (select all)	
+				if(code === 89 && (e.metaKey || e.ctrlKey)) e.preventDefault() // all (select all)	
+				if(code === 83 && (e.metaKey || e.ctrlKey)) e.preventDefault() // ctrl s
+				if(code === 90 && (e.metaKey || e.ctrlKey)){
+					this.update_text_area_pos();
+					ta.value = "";
+					ugly_ime_hack = true;
+					ta.readOnly = true;
+					e.preventDefault()
+				}
+
+				this.to_wasm.key_down({
+					key_code:e.keyCode,
+					char_code:e.charCode,
+					is_repeat:e.repeat,
+					time:e.timeStamp / 1000.0,
+					modifiers:pack_key_modifier(e)
+				})
+				
+				this.do_wasm_io();
+			})
+			ta.addEventListener('keyup', e=>{
+				let code = e.keyCode;
+				
+				if(code == 18 || code == 17 || code == 16) e.preventDefault(); // alt
+				if(code == 91){firefox_logo_key = false; e.preventDefault();}
+				var ta = this.text_area;
+				if(ugly_ime_hack){
+					ugly_ime_hack = false;
+					document.body.removeChild(ta);
+					this.bind_keyboard();
+					this.update_text_area_pos();
+				}
+				this.to_wasm.key_up({
+					key_code:e.keyCode,
+					char_code:e.charCode,
+					is_repeat:e.repeat,
+					time:e.timeStamp / 1000.0,
+					modifiers:pack_key_modifier(e)
+				})
+				this.do_wasm_io();
+			})			
+			document.body.appendChild(ta);
+			ta.focus();
+		}
+	
+		focus_keyboard_input(){
+			this.text_area.focus();
+		}
+
+		update_text_area_pos(){
+			var pos = this.text_area_pos;
+			var ta = this.text_area;
+			if(ta){
+				ta.style.left = Math.round(pos.x)+4;// + "px";
+				ta.style.top = Math.round(pos.y);// + "px"
+			}
+		}
+
+		show_text_ime(x,y){
+			this.text_area_pos = {x:x,y:y}
+			this.update_text_area_pos();
+		}
+
+		hide_text_ime(){
 		}
 
 		alloc_array_buffer(array_buffer_id, array){
@@ -983,6 +1228,15 @@
 		},
 		function read_file_13(self){
 			self.read_file(self.mu32[self.parse++], self.parse_string());
+		},
+		function show_text_ime_14(self){
+			self.show_text_ime(self.mf32[self.parse++], self.mf32[self.parse++])
+		},
+		function hide_text_ime_15(self){
+			self.hide_text_ime();
+		},
+		function text_copy_response_16(self){
+			self.text_copy_response = self.parse_string();
 		}
 	]
 	
@@ -1037,9 +1291,15 @@
 		return out	
 	}
 
+	var firefox_logo_key = false;
+	function pack_key_modifier(e){
+		return (e.shiftKey?1:0)|(e.ctrlKey?2:0)|(e.altKey?4:0)|((e.metaKey || firefox_logo_key)?8:0)		
+	}
+
 	var wasm_instances = [];
 
 	function init(){
+		console.log("NOTICE! When profiling in chrome check 'Disable JavaScript Samples' under the gear icon. It slows the readings by a factor of 6-8x")
 		for(let i = 0; i < canvasses.length; i++){
 			// we found a canvas. instance the referenced wasm file
 			var canvas = canvasses[i]
@@ -1055,14 +1315,6 @@
 				});
 			// load this wasm file
 		}
-	}
-
-	function compile_progress_shader(){
-		
-	}
-
-	function draw_progress_shader(psh, blob, deps, compile){
-
 	}
 
 	var canvasses =	document.getElementsByClassName('cx_webgl')

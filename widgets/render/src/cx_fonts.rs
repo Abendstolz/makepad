@@ -1,5 +1,80 @@
 use crate::cx::*;
 
+#[derive(Clone)]
+pub struct BinaryDep{
+    pub name:String,
+    pub vec_obj:Vec<u8>,
+    pub parse:isize
+}
+
+impl BinaryDep{
+    pub fn new_from_vec(name:String, vec_obj:Vec<u8>)->BinaryDep{
+
+        BinaryDep{
+            name:name, 
+            vec_obj:vec_obj,
+            parse:0
+        }
+    }
+
+    pub fn u8(&mut self)->Result<u8, String>{
+        if self.parse + 1 > self.vec_obj.len() as isize{
+            return Err(format!("Eof on u8 file {} offset {}", self.name, self.parse))
+        }
+        unsafe{
+            let ret = (self.vec_obj.as_ptr().offset(self.parse) as *const u8).read();
+            self.parse += 1;
+            Ok(ret)
+        }
+    }
+
+    pub fn u16(&mut self)->Result<u16, String>{
+        if self.parse+2 > self.vec_obj.len() as isize{
+            return Err(format!("Eof on u16 file {} offset {}", self.name, self.parse))
+        }
+        unsafe{
+            let ret = (self.vec_obj.as_ptr().offset(self.parse) as *const u16).read();
+            self.parse += 2;
+            Ok(ret)
+        }
+    }
+
+    pub fn u32(&mut self)->Result<u32, String>{
+        if self.parse+4 > self.vec_obj.len() as isize{
+            return Err(format!("Eof on u32 file {} offset {}", self.name, self.parse))
+        }
+        unsafe{
+            let ret = (self.vec_obj.as_ptr().offset(self.parse) as *const u32).read();
+            self.parse += 4;
+            Ok(ret)
+        }
+    }
+
+    pub fn f32(&mut self)->Result<f32, String>{
+        if self.parse+4 > self.vec_obj.len() as isize{
+            return Err(format!("Eof on f32 file {} offset {}", self.name, self.parse))
+        }
+        unsafe{
+            let ret = (self.vec_obj.as_ptr().offset(self.parse) as *const f32).read();
+            self.parse += 4;
+            Ok(ret)
+        }
+    }
+
+    pub fn read(&mut self, out:&mut [u8])->Result<usize, String>{
+        let len = out.len();
+        if self.parse + len as isize > self.vec_obj.len() as isize{
+             return Err(format!("Eof on read file {} len {} offset {}", self.name, out.len(), self.parse));
+        };
+        //unsafe{
+            for i in 0..len{
+                out[i] = self.vec_obj[self.parse as usize + i];
+            };
+            self.parse += len as isize;
+        //}
+        Ok(len)
+    }
+}
 impl Cx{
     pub fn load_font(&mut self, file_name: &str)->usize{
         let found = self.fonts.iter().position(|v| v.name == file_name);
@@ -70,6 +145,7 @@ pub struct Font{
     pub rgbsize:usize,
     pub onesize:usize,
     pub kernsize:usize, 
+    pub scale:f32,
     pub glyphs:Vec<Glyph>,
     pub unicodes:Vec<usize>,
     pub kerntable:Vec<Kern>,
@@ -88,6 +164,7 @@ impl Font{
             rgbsize: inp.u32()? as usize,
             onesize: inp.u32()? as usize,
             kernsize:inp.u32()? as usize,
+            scale:inp.f32()?,
             ..Default::default()
         };
         ff.unicodes.resize(65535, 0);
@@ -187,7 +264,7 @@ impl Font{
             //ff.unicodes.insert(b.unicode, i as  u32);
             ox += b.tw+1;
         }
-
+        /*
         ff.unicodes[32] = ff.glyphs.len();
         ff.glyphs.push(Glyph{
             unicode:32,
@@ -204,43 +281,32 @@ impl Font{
             ty1:0.0,
             tx2:0.0,
             ty2:0.0,
+        });*/
+
+        let mut excl_slot = ff.glyphs[ff.unicodes[33]].clone();
+
+        // set texture coord to 0
+        excl_slot.tx1 = 0.0;
+        excl_slot.ty1 = 0.0;
+        excl_slot.tx2 = 0.0;
+        excl_slot.ty2 = 0.0;
+
+        ff.unicodes[32] = ff.glyphs.len();
+        ff.glyphs.push(Glyph{
+            unicode:32,
+            ..excl_slot.clone()
         });
 
         ff.unicodes[10] = ff.glyphs.len();
-        ff.unicodes[13] = ff.glyphs.len();
         ff.glyphs.push(Glyph{
             unicode:10,
-            x1:0.0,
-            y1:-0.3,
-            x2:0.5,
-            y2:1.0,
-            advance:-0.5,
-            tsingle:0,
-            toffset:0,
-            tw:0,
-            th:0,
-            tx1:0.0,
-            ty1:0.0,
-            tx2:0.0,
-            ty2:0.0,
+            ..excl_slot.clone()
         });
-       
-       ff.unicodes[9] = ff.glyphs.len();
+
+        ff.unicodes[9] = ff.glyphs.len();
         ff.glyphs.push(Glyph{
             unicode:9,
-            x1:0.0,
-            y1:-0.3,
-            x2:2.0,
-            y2:1.0,
-            advance:2.0,
-            tsingle:0,
-            toffset:0,
-            tw:0,
-            th:0,
-            tx1:0.0,
-            ty1:0.0,
-            tx2:0.0,
-            ty2:0.0,
+            ..excl_slot.clone()
         });
 
         Ok(ff)

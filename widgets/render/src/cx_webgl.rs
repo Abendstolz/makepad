@@ -15,7 +15,7 @@ impl Cx{
             if sub_list_id != 0{
                 self.exec_draw_list(sub_list_id);
             }
-            else{ 
+            else{
                 let draw_list = &mut self.draw_lists[draw_list_id];
 
                 draw_list.set_clipping_uniforms();
@@ -58,7 +58,7 @@ impl Cx{
     }
 
     pub fn repaint(&mut self){
-        self.platform.from_wasm.clear(self.clear_color.x, self.clear_color.y, self.clear_color.z, self.clear_color.w);
+        self.platform.from_wasm.clear(self.clear_color.r, self.clear_color.g, self.clear_color.b, self.clear_color.a);
         self.prepare_frame();        
         self.exec_draw_list(0);
     }
@@ -126,13 +126,13 @@ impl Cx{
                     }
                 },
                 3=>{ // init
-                    self.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
+                    self.target_size = Vec2{x:to_wasm.mf32(), y:to_wasm.mf32()};
                     self.target_dpi_factor = to_wasm.mf32();
                     self.call_event_handler(&mut event_handler, &mut Event::Construct); 
                     self.redraw_area(Area::All);
                 },
                 4=>{ // resize
-                    self.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
+                    self.target_size = Vec2{x:to_wasm.mf32(), y:to_wasm.mf32()};
                     self.target_dpi_factor = to_wasm.mf32();
                     
                     // do our initial redraw and repaint
@@ -142,85 +142,150 @@ impl Cx{
                     is_animation_frame = true;
                     let time = to_wasm.mf64();
                     //log!(self, "{} o clock",time);
-                    self.call_animation_event(&mut event_handler, time);
+                    if self.playing_anim_areas.len() != 0{
+                        self.call_animation_event(&mut event_handler, time);
+                    }
+                    if self.next_frame_callbacks.len() != 0{
+                        self.call_frame_event(&mut event_handler, time);
+                    }
                 },
                 6=>{ // finger down
-                    let x = to_wasm.mf32();
-                    let y = to_wasm.mf32();
+                    let abs = Vec2{x:to_wasm.mf32(),y:to_wasm.mf32()};
                     let digit = to_wasm.mu32() as usize;
                     self.platform.fingers_down[digit] = true;
+                    let is_touch = to_wasm.mu32()>0;
+                    let modifiers = unpack_key_modifier(to_wasm.mu32());
+                    let time = to_wasm.mf64();
+                    let tap_count = self.process_tap_count(digit, abs, time);
                     self.call_event_handler(&mut event_handler, &mut Event::FingerDown(FingerDownEvent{
-                        abs:vec2(x,y), 
-                        rel:vec2(x,y),
+                        abs:abs, 
+                        rel:abs,
+                        rect:Rect::zero(),
                         handled:false,
                         digit:digit,
-                        is_touch:to_wasm.mu32()>0
+                        is_touch:is_touch,
+                        modifiers:modifiers,
+                        time:time,
+                        tap_count:tap_count
                     }));
                 },
                 7=>{ // finger up
-                    let x = to_wasm.mf32();
-                    let y = to_wasm.mf32();
+                    let abs = Vec2{x:to_wasm.mf32(),y:to_wasm.mf32()};
                     let digit = to_wasm.mu32() as usize;
                     self.platform.fingers_down[digit] = false;
                     if !self.platform.fingers_down.iter().any(|down| *down){
                         self.down_mouse_cursor = None;
                     }
+                    let is_touch = to_wasm.mu32()>0;
+                    let modifiers = unpack_key_modifier(to_wasm.mu32());
+                    let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerUp(FingerUpEvent{
-                        abs:vec2(x,y), 
-                        rel:vec2(x,y),
-                        abs_start:vec2(0.,0.),
-                        rel_start:vec2(0.,0.),
+                        abs:abs, 
+                        rel:abs,
+                        rect:Rect::zero(),
+                        abs_start:Vec2::zero(),
+                        rel_start:Vec2::zero(),
                         digit:digit,
                         is_over:false,
-                        is_touch:to_wasm.mu32()>0
+                        is_touch:is_touch,
+                        modifiers:modifiers,
+                        time:time
                     }));
                 },
                 8=>{ // finger move
-                    let x = to_wasm.mf32();
-                    let y = to_wasm.mf32();
+                    let abs = Vec2{x:to_wasm.mf32(),y:to_wasm.mf32()};
+                    let digit = to_wasm.mu32() as usize;
+                    let is_touch = to_wasm.mu32()>0;
+                    let modifiers = unpack_key_modifier(to_wasm.mu32());
+                    let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerMove(FingerMoveEvent{
-                        abs:vec2(x,y) ,
-                        rel:vec2(x,y),
-                        abs_start:vec2(0.,0.),
-                        rel_start:vec2(0.,0.),
+                        abs:abs,
+                        rel:abs,
+                        rect:Rect::zero(),
+                        abs_start:Vec2::zero(),
+                        rel_start:Vec2::zero(),
                         is_over:false,
-                        digit:to_wasm.mu32() as usize,
-                        is_touch:to_wasm.mu32()>0
+                        digit:digit,
+                        is_touch:is_touch,
+                        modifiers:modifiers,
+                        time:time
                     }));
                 },
                 9=>{ // finger hover
-                    let x = to_wasm.mf32();
-                    let y = to_wasm.mf32();
+                    let abs = Vec2{x:to_wasm.mf32(),y:to_wasm.mf32()};
                     self.hover_mouse_cursor = None;
+                    let modifiers = unpack_key_modifier(to_wasm.mu32());
+                    let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerHover(FingerHoverEvent{
-                        abs:vec2(x,y) ,
-                        rel:vec2(x,y),
+                        abs:abs,
+                        rel:abs,
+                        rect:Rect::zero(),
                         handled:false,
-                        hover_state:HoverState::Over
+                        hover_state:HoverState::Over,
+                        modifiers:modifiers,
+                        time:time
                     }));
                 },
                 10=>{ // finger scroll
-                    let x = to_wasm.mf32();
-                    let y = to_wasm.mf32();
+                    let abs = Vec2{x:to_wasm.mf32(),y:to_wasm.mf32()};
+                    let scroll = Vec2{
+                        x:to_wasm.mf32(), 
+                        y:to_wasm.mf32()
+                    };
+                    let is_wheel = to_wasm.mu32() != 0;
+                    let modifiers = unpack_key_modifier(to_wasm.mu32());
+                    let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerScroll(FingerScrollEvent{
-                        abs:vec2(x,y) ,
-                        rel:vec2(x,y),
+                        abs:abs,
+                        rel:abs,
+                        rect:Rect::zero(),
                         handled:false,
-                        scroll:vec2(to_wasm.mf32(),to_wasm.mf32()),
+                        scroll:scroll,
+                        is_wheel:is_wheel,
+                        modifiers:modifiers,
+                        time:time
                     }));
                 },
-                11=>{
-                    // finger out
-                    let x = to_wasm.mf32();
-                    let y = to_wasm.mf32();
+                11=>{// finger out
+                    let abs = Vec2{x:to_wasm.mf32(),y:to_wasm.mf32()};
+                    let modifiers = unpack_key_modifier(to_wasm.mu32());
+                    let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerHover(FingerHoverEvent{
-                        abs:vec2(x,y) ,
-                        rel:vec2(x,y),
+                        abs:abs,
+                        rel:abs,
+                        rect:Rect::zero(),
                         handled:false,
-                        hover_state:HoverState::Out
+                        hover_state:HoverState::Out,
+                        modifiers:modifiers,
+                        time:time
                     }));
                 },
-                12=>{ // file read data
+                12=>{ // key_down
+                    self.call_event_handler(&mut event_handler, &mut Event::KeyDown(KeyEvent{
+                        key_code:web_to_key_code(to_wasm.mu32()),
+                        key_char:if let Some(c) = std::char::from_u32(to_wasm.mu32()){c}else{'?'},
+                        is_repeat:to_wasm.mu32() > 0,
+                        modifiers:unpack_key_modifier(to_wasm.mu32()),
+                        time:to_wasm.mf64()
+                    }));
+                },
+                13=>{ // key up
+                    self.call_event_handler(&mut event_handler, &mut Event::KeyUp(KeyEvent{
+                        key_code:web_to_key_code(to_wasm.mu32()),
+                        key_char:if let Some(c) = std::char::from_u32(to_wasm.mu32()){c}else{'?'},
+                        is_repeat:to_wasm.mu32() > 0,
+                        modifiers:unpack_key_modifier(to_wasm.mu32()),
+                        time:to_wasm.mf64()
+                    }));
+                },
+                14=>{ // text input
+                    self.call_event_handler(&mut event_handler, &mut Event::TextInput(TextInputEvent{
+                        was_paste:to_wasm.mu32()>0,
+                        replace_last:to_wasm.mu32()>0,
+                        input:to_wasm.parse_string(),
+                    }));
+                },
+                15=>{ // file read data
                     let id = to_wasm.mu32();
                     let buf_ptr = to_wasm.mu32() as *mut u8;
                     let buf_len = to_wasm.mu32() as usize;
@@ -231,16 +296,25 @@ impl Cx{
                         data:Ok(vec_buf)
                     }));
                 },
-                13=>{ // file read error
-
-                }
+                16=>{ // text copy
+                    let mut event = Event::TextCopy(TextCopyEvent{
+                        response:None
+                    });
+                    self.call_event_handler(&mut event_handler, &mut event);
+                    match &event{
+                        Event::TextCopy(req)=>if let Some(response) = &req.response{
+                            self.platform.from_wasm.text_copy_response(&response);
+                        }
+                        _=>()
+                    };
+                },
                 _=>{
                     panic!("Message unknown")
                 }
             };
         };
 
-        if self.redraw_areas.len()>0{
+        if is_animation_frame && self.redraw_areas.len()>0{
             self.call_draw_event(&mut event_handler, root_view);
             self.paint_dirty = true;
         }
@@ -257,6 +331,7 @@ impl Cx{
 
         if is_animation_frame && self.paint_dirty{
             self.paint_dirty = false;
+            self.repaint_id += 1;
             self.repaint();
         }
 
@@ -265,7 +340,7 @@ impl Cx{
         
         // request animation frame if still need to redraw, or repaint
         // we use request animation frame for that.
-        if self.redraw_areas.len() > 0 || self.playing_anim_areas.len()> 0 || self.paint_dirty{
+        if self.redraw_areas.len() > 0 || self.playing_anim_areas.len()> 0 || self.paint_dirty || self.next_frame_callbacks.len() != 0{
             self.platform.from_wasm.request_animation_frame();
         }
 
@@ -291,6 +366,14 @@ impl Cx{
         self.platform.from_wasm.read_file(id as u32, path);
         self.platform.file_read_id += 1;
         id
+    }
+
+    pub fn show_text_ime(&mut self, x:f32, y:f32){
+        self.platform.from_wasm.show_text_ime(x,y);
+    }
+
+    pub fn hide_text_ime(&mut self){
+        self.platform.from_wasm.hide_text_ime();
     }
 
     pub fn compile_all_webgl_shaders(&mut self){
@@ -350,6 +433,143 @@ impl Cx{
         Ok(csh)
     }
 
+}
+
+fn unpack_key_modifier(modifiers:u32)->KeyModifiers{
+    KeyModifiers{
+        shift:(modifiers&1) != 0,
+        control:(modifiers&2) != 0,
+        alt:(modifiers&4) != 0,
+        logo:(modifiers&8) != 0
+    }
+}
+
+fn web_to_key_code(key_code:u32)->KeyCode{
+    match key_code{
+        27=>KeyCode::Escape,
+        192=>KeyCode::Backtick,
+        48=>KeyCode::Key0,
+        49=>KeyCode::Key1,
+        50=>KeyCode::Key2,
+        51=>KeyCode::Key3,
+        52=>KeyCode::Key4,
+        53=>KeyCode::Key5,
+        54=>KeyCode::Key6,
+        55=>KeyCode::Key7,
+        56=>KeyCode::Key8,
+        57=>KeyCode::Key9,
+        173=>KeyCode::Minus,
+        189=>KeyCode::Minus,
+        61=>KeyCode::Equals,
+        187=>KeyCode::Equals,
+     
+        8=>KeyCode::Backspace,
+        9=>KeyCode::Tab,
+
+        81=>KeyCode::KeyQ,
+        87=>KeyCode::KeyW,
+        69=>KeyCode::KeyE,
+        82=>KeyCode::KeyR,
+        84=>KeyCode::KeyT,
+        89=>KeyCode::KeyY,
+        85=>KeyCode::KeyU,
+        73=>KeyCode::KeyI,
+        79=>KeyCode::KeyO,
+        80=>KeyCode::KeyP,
+        219=>KeyCode::LBracket,
+        221=>KeyCode::RBracket,
+        13=>KeyCode::Return,
+
+        65=>KeyCode::KeyA,
+        83=>KeyCode::KeyS,
+        68=>KeyCode::KeyD,
+        70=>KeyCode::KeyF,
+        71=>KeyCode::KeyG,
+        72=>KeyCode::KeyH,
+        74=>KeyCode::KeyJ,
+        75=>KeyCode::KeyK,
+        76=>KeyCode::KeyL,
+
+        59=>KeyCode::Semicolon,
+        186=>KeyCode::Semicolon,
+        222=>KeyCode::Quote,
+        220=>KeyCode::Backslash,
+
+        90=>KeyCode::KeyZ,
+        88=>KeyCode::KeyX,
+        67=>KeyCode::KeyC,
+        86=>KeyCode::KeyV,
+        66=>KeyCode::KeyB,
+        78=>KeyCode::KeyN,
+        77=>KeyCode::KeyM,
+        188=>KeyCode::Comma,
+        190=>KeyCode::Period,
+        191=>KeyCode::Slash,
+
+        17=>KeyCode::Control,
+        18=>KeyCode::Alt,
+        16=>KeyCode::Shift,
+        224=>KeyCode::Logo,
+        91=>KeyCode::Logo,
+
+        //RightControl,
+        //RightShift,
+        //RightAlt,
+        93=>KeyCode::Logo,
+
+        32=>KeyCode::Space,
+        20=>KeyCode::Capslock,
+        112=>KeyCode::F1,
+        113=>KeyCode::F2,
+        114=>KeyCode::F3,
+        115=>KeyCode::F4,
+        116=>KeyCode::F5,
+        117=>KeyCode::F6,
+        118=>KeyCode::F7,
+        119=>KeyCode::F8,
+        120=>KeyCode::F9,
+        121=>KeyCode::F10,
+        122=>KeyCode::F11,
+        123=>KeyCode::F12,
+
+        44=>KeyCode::PrintScreen,
+        124=>KeyCode::PrintScreen,
+        //Scrolllock,
+        //Pause,
+    
+        45=>KeyCode::Insert,
+        46=>KeyCode::Delete,
+        36=>KeyCode::Home,
+        35=>KeyCode::End,
+        33=>KeyCode::PageUp,
+        34=>KeyCode::PageDown,
+
+        96=>KeyCode::Numpad0,
+        97=>KeyCode::Numpad1,
+        98=>KeyCode::Numpad2,
+        99=>KeyCode::Numpad3,
+        100=>KeyCode::Numpad4,
+        101=>KeyCode::Numpad5,
+        102=>KeyCode::Numpad6,
+        103=>KeyCode::Numpad7,
+        104=>KeyCode::Numpad8,
+        105=>KeyCode::Numpad9,
+
+        //NumpadEquals,
+        109=>KeyCode::NumpadSubtract,
+        107=>KeyCode::NumpadAdd,
+        110=>KeyCode::NumpadDecimal,
+        106=>KeyCode::NumpadMultiply,
+        111=>KeyCode::NumpadDivide,
+        12=>KeyCode::Numlock,
+        //NumpadEnter,
+
+        38=>KeyCode::ArrowUp,
+        40=>KeyCode::ArrowDown,
+        37=>KeyCode::ArrowLeft,
+        39=>KeyCode::ArrowRight,
+        _=>KeyCode::Unknown
+    }
 }
 
 #[derive(Default,Clone)]
@@ -797,6 +1017,24 @@ impl FromWasm{
         self.mu32(13);
         self.mu32(id);
         self.add_string(path);
+    }
+
+    pub fn show_text_ime(&mut self, x:f32, y:f32){
+        self.fit(3);
+        self.mu32(14);
+        self.mf32(x);
+        self.mf32(y);
+    }
+
+    pub fn hide_text_ime(&mut self){
+        self.fit(1);
+        self.mu32(15);
+    }
+
+    pub fn text_copy_response(&mut self, response:&str){
+        self.fit(1);
+        self.mu32(16);
+        self.add_string(response);
     }
 
     fn add_string(&mut self, msg:&str){

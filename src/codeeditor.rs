@@ -7,15 +7,157 @@ pub struct CodeEditor{
     pub bg_layout:Layout,
     pub bg: Quad,
     pub cursor: Quad,
+    pub marker: Quad,
     pub tab:Quad,
     pub text: Text,
-    pub cursors:Vec<Cursor>,
+    pub cursors:CursorSet,
+    
+    pub open_font_size:f32,
+    pub folded_font_size:f32,
+
     pub _hit_state:HitState,
     pub _bg_area:Area,
     pub _text_inst:Option<AlignedInstance>,
-    pub _scroll:Vec2,
+    pub _text_area:Area,
+    pub _scroll_pos:Vec2,
+    pub _last_finger_move:Option<Vec2>,
+    pub _paren_stack:Vec<ParenItem>,
+    pub _paren_list:Vec<ParenItem>,
+    pub _line_geometry:Vec<LineGeom>,
+    pub _anim_select:Vec<AnimSelect>,
+    pub _token_chunks:Vec<TokenChunk>,
+    pub _visible_lines:usize,
+
+    pub _select_scroll:Option<SelectScroll>,
+    pub _grid_select_corner:Option<TextPos>,
+
+    pub _anim_font_size:f32,
+    pub _line_largest_font:f32,
+    pub _anim_folding:AnimFolding,
+
     pub _monospace_size:Vec2,
-    pub _instance_count:usize
+    pub _instance_count:usize,
+    pub _first_on_line:bool,
+    pub _draw_cursor:DrawCursor
+}
+
+#[derive(Clone)]
+pub enum AnimFoldingState{
+    Open,
+    Opening(f32,f32,f32),
+    Folded,
+    Folding(f32,f32,f32)
+}
+
+impl AnimFoldingState{
+    fn is_animating(&self)->bool{
+        match self{
+            AnimFoldingState::Open=>false,
+            AnimFoldingState::Folded=>false,
+            _=>true
+        }
+    }
+
+    fn is_folded(&self)->bool{
+        match self{
+            AnimFoldingState::Open=>false,
+            _=>true
+        }
+    }
+
+    fn get_font_size(&self, open_size:f32, folded_size:f32)->f32{
+        match self{
+            AnimFoldingState::Open=>open_size,
+            AnimFoldingState::Folded=>folded_size,
+            AnimFoldingState::Opening(f, _, _)=>f*folded_size + (1.-f)*open_size,
+            AnimFoldingState::Folding(f, _, _)=>f*open_size + (1.-f)*folded_size,
+        }
+    }
+
+    fn do_folding(&mut self, speed:f32, speed2:f32){
+        *self = match self{
+            AnimFoldingState::Open=>AnimFoldingState::Folding(1.0, speed,speed2),
+            AnimFoldingState::Folded=>AnimFoldingState::Folded,
+            AnimFoldingState::Opening(f, _, _)=>AnimFoldingState::Folding(1.0 - *f, speed,speed2),
+            AnimFoldingState::Folding(f, _, _)=>AnimFoldingState::Folding(*f, speed,speed2),
+        }
+    }
+
+    fn do_opening(&mut self, speed:f32, speed2:f32){
+        *self = match self{
+            AnimFoldingState::Open=>AnimFoldingState::Open,
+            AnimFoldingState::Folded=>AnimFoldingState::Opening(1.0, speed, speed2),
+            AnimFoldingState::Opening(f,_,_)=>AnimFoldingState::Opening(*f, speed, speed2),
+            AnimFoldingState::Folding(f,_,_)=>AnimFoldingState::Opening(1.0 - *f, speed, speed2),
+        }
+    }
+
+    fn next_anim_step(&mut self){
+        *self = match self{
+            AnimFoldingState::Open=>AnimFoldingState::Open,
+            AnimFoldingState::Folded=>AnimFoldingState::Folded,
+            AnimFoldingState::Opening(f,speed, speed2)=>{
+                let new_f = *f * *speed;
+                if new_f < 0.001{
+                    AnimFoldingState::Open
+                }
+                else{
+                    AnimFoldingState::Opening(new_f,*speed * *speed2, *speed2)
+                }
+            },
+            AnimFoldingState::Folding(f, speed, speed2)=>{
+                let new_f = *f * *speed;
+                if new_f < 0.001{
+                    AnimFoldingState::Folded
+                }
+                else{
+                    AnimFoldingState::Folding(new_f,*speed * *speed2, *speed2)
+                }
+            },
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AnimFolding{
+    pub state:AnimFoldingState,
+    pub first_visible:(usize,f32),
+    pub did_animate:bool
+}
+
+#[derive(Clone)]
+pub struct AnimSelect{
+    pub ypos:f32,
+    pub invert:bool,
+    pub time:f64
+}
+
+#[derive(Clone, Default)]
+pub struct LineGeom{
+    walk:Vec2,
+    font_size:f32
+}
+
+#[derive(Clone, Default)]
+pub struct SelectScroll{
+//    pub margin:Margin,
+    pub delta:Vec2,
+    pub abs:Vec2,
+    pub at_end:bool
+}
+
+#[derive(Clone)]
+pub struct ParenItem{
+    start:usize,
+    end:usize,
+    paren_type:ParenType
+}
+
+#[derive(Clone, PartialEq)]
+pub enum ParenType{
+    Round,
+    Square,
+    Curly
 }
 
 impl ElementLife for CodeEditor{
@@ -26,9 +168,10 @@ impl ElementLife for CodeEditor{
 impl Style for CodeEditor{
     fn style(cx:&mut Cx)->Self{
         let tab_sh = Self::def_tab_shader(cx);
-
+        let marker_sh = Self::def_marker_shader(cx);
+        let cursor_sh = Self::def_cursor_shader(cx);
         let code_editor = Self{
-            cursors:vec![Cursor{head:0,tail:0,max:0}],
+            cursors:CursorSet::new(),
             tab:Quad{
                 color:color("#5"),
                 shader_id:cx.add_shader(tab_sh, "Editor.tab"),
@@ -39,6 +182,7 @@ impl Style for CodeEditor{
                     ..Style::style(cx)
                 }),
                 scroll_v:Some(ScrollBar{
+                    smoothing:Some(0.15),
                     ..Style::style(cx)
                 }),
                 ..Style::style(cx)
@@ -48,8 +192,14 @@ impl Style for CodeEditor{
                 do_scroll:false,
                 ..Style::style(cx)
             },
+            marker:Quad{
+                color:color256(42,78,117),
+                shader_id:cx.add_shader(marker_sh, "Editor.marker"),
+                ..Style::style(cx)
+            }, 
             cursor:Quad{
-                color:color256(30,30,30),
+                color:color256(136,136,136),
+                shader_id:cx.add_shader(cursor_sh, "Editor.cursor"),
                 ..Style::style(cx)
             },
             bg_layout:Layout{
@@ -62,16 +212,38 @@ impl Style for CodeEditor{
             text:Text{
                 font_id:cx.load_font(&cx.font("mono_font")),
                 font_size:11.0,
+                brightness:1.05,
                 line_spacing:1.4,
                 wrapping:Wrapping::Line,
                 ..Style::style(cx)
             },
+            open_font_size:11.0,
+            folded_font_size:0.5,
             _hit_state:HitState{no_scrolling:true, ..Default::default()},
-            _monospace_size:vec2(0.,0.),
-            _scroll:vec2(0.,0.),
+            _monospace_size:Vec2::zero(),
+            _last_finger_move:None,
+            _first_on_line:true,
+            _scroll_pos:Vec2::zero(),
+            _visible_lines:0, 
+            _line_geometry:Vec::new(),
+            _token_chunks:Vec::new(),
+            _anim_select:Vec::new(),
+            _grid_select_corner:None,
             _bg_area:Area::Empty,
             _text_inst:None,
+            _text_area:Area::Empty,
             _instance_count:0,
+            _anim_font_size:11.0,
+            _line_largest_font:0.,
+            _anim_folding:AnimFolding{
+                state:AnimFoldingState::Open,
+                first_visible:(0,0.0),
+                did_animate:false,
+            },
+            _select_scroll:None,
+            _draw_cursor:DrawCursor::new(),
+            _paren_stack:Vec::new(),
+            _paren_list:Vec::new(),
         };
         //tab.animator.default = tab.anim_default(cx);
         code_editor
@@ -98,9 +270,71 @@ impl CodeEditor{
         }));
         sh
     }
+
+    pub fn def_cursor_shader(cx:&mut Cx)->Shader{
+        let mut sh = Quad::def_quad_shader(cx);
+        sh.add_ast(shader_ast!({
+            fn pixel()->vec4{
+                return vec4(color.rgb*color.a,color.a)
+            }
+        }));
+        sh
+    }
+
+    pub fn def_marker_shader(cx:&mut Cx)->Shader{
+        let mut sh = Quad::def_quad_shader(cx);
+        sh.add_ast(shader_ast!({
+            let prev_x:float<Instance>;
+            let prev_w:float<Instance>;
+            let next_x:float<Instance>;
+            let next_w:float<Instance>;
+            const gloopiness:float = 8.;
+            const border_radius:float = 2.;
+
+            fn vertex()->vec4{ // custom vertex shader because we widen the draweable area a bit for the gloopiness
+                let shift:vec2 = -draw_list_scroll * draw_list_do_scroll;
+                let clipped:vec2 = clamp(
+                    geom*vec2(w+16., h) + vec2(x, y) + shift - vec2(8.,0.),
+                    draw_list_clip.xy,
+                    draw_list_clip.zw
+                );
+                pos = (clipped - shift - vec2(x,y)) / vec2(w, h);
+                return vec4(clipped,0.,1.) * camera_projection;
+            }
+
+            fn pixel()->vec4{
+                df_viewport(pos * vec2(w, h));
+                df_box(0., 0., w, h, border_radius);
+                if prev_w > 0.{
+                    df_box(prev_x, -h, prev_w, h, border_radius);
+                    df_gloop(gloopiness);
+                }
+                if next_w > 0.{
+                    df_box(next_x, h, next_w, h, border_radius);
+                    df_gloop(gloopiness);
+                }
+                return df_fill(color);
+            }
+        }));
+        sh
+    }
+
     pub fn handle_code_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->CodeEditorEvent{
         match self.view.handle_scroll_bars(cx, event){
-            (_,ScrollBarEvent::Scroll{..})=>{
+            (_,ScrollBarEvent::Scroll{..}) | (ScrollBarEvent::Scroll{..},_)=>{
+                if let Some(last_finger_move) = self._last_finger_move{
+                    if let Some(grid_select_corner) = self._grid_select_corner{
+                        let pos = self.compute_grid_text_pos_from_abs(cx, last_finger_move);
+                        self.cursors.grid_select(grid_select_corner, pos, text_buffer);
+                    }
+                    else{
+                        let offset = self.text.find_closest_offset(cx, &self._text_area, last_finger_move);
+                        self.cursors.set_last_cursor_head(offset, text_buffer);
+                    }
+                }
+                // the editor actually redraws on scroll, its because we don't actually
+                // generate the entire file as GPU text-buffer just the visible area
+                // in JS this wasn't possible performantly but in Rust its a breeze.
                 self.view.redraw_view_area(cx);
             },
             _=>()
@@ -108,40 +342,319 @@ impl CodeEditor{
         match event.hits(cx, self._bg_area, &mut self._hit_state){
             Event::Animate(_ae)=>{
             },
-            Event::FingerDown(_fe)=>{
+            Event::FingerDown(fe)=>{
+                cx.set_down_mouse_cursor(MouseCursor::Text);
                 // give us the focus
-                cx.set_key_focus(self._bg_area)
+                cx.set_key_focus(self._bg_area);
+                let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
+                match fe.tap_count{
+                    1=>{
+                    },
+                    2=>{
+                        let range = self.get_nearest_token_chunk_range(offset);
+                        self.cursors.set_last_clamp_range(range);
+                    },
+                    3=>{
+                        let range = text_buffer.get_nearest_line_range(offset);
+                        self.cursors.set_last_clamp_range(range);
+                    },
+                    _=>{
+                        let range = (0, text_buffer.calc_char_count());
+                        self.cursors.set_last_clamp_range(range);
+                    }
+                }
+                // ok so we should scan a range 
+
+                if fe.modifiers.shift{
+                    if fe.modifiers.logo || fe.modifiers.control{ // grid select
+                        let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
+                        self._grid_select_corner = Some(self.cursors.grid_select_corner(pos, text_buffer));
+                        self.cursors.grid_select(self._grid_select_corner.unwrap(), pos, text_buffer);
+                    }
+                    else{ // simply place selection
+                        self.cursors.clear_and_set_last_cursor_head(offset, text_buffer);
+                    }
+                }
+                else{ // cursor drag with possible add
+                    if fe.modifiers.logo || fe.modifiers.control{
+                        self.cursors.add_last_cursor_head_and_tail(offset, text_buffer);
+                    }
+                    else{
+                        self.cursors.clear_and_set_last_cursor_head_and_tail(offset, text_buffer);
+                    }
+                }
+                self.view.redraw_view_area(cx);
+                self._last_finger_move = Some(fe.abs);
+
             },
             Event::FingerHover(_fe)=>{
+                cx.set_hover_mouse_cursor(MouseCursor::Text);
             },
-            Event::FingerUp(_fe)=>{
+            Event::FingerUp(fe)=>{
+
+                // do the folded scrollnav
+                if self._anim_folding.state.is_folded() && !fe.modifiers.shift{
+                    let (start,end) = self.cursors.get_last_cursor_order();
+                    if start == end{
+                        self.scroll_last_cursor_to_top(cx, text_buffer);
+                    }
+                }
+
+                self.cursors.clear_last_clamp_range();
+                //self.cursors.end_cursor_drag(text_buffer);
+                self._select_scroll = None;
+                self._last_finger_move = None;
+                self._grid_select_corner = None;
             },
-            Event::FingerMove(_fe)=>{
+            Event::FingerMove(fe)=>{
+                if let Some(grid_select_corner) = self._grid_select_corner{
+                    let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
+                    self.cursors.grid_select(grid_select_corner, pos, text_buffer);
+                }
+                else{
+                    let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
+                    self.cursors.set_last_cursor_head(offset, text_buffer);
+                }
+
+                self._last_finger_move = Some(fe.abs);
+                // determine selection drag scroll dynamics
+                let pow_scale = 0.1;
+                let pow_fac = 3.;
+                let max_speed = 40.;
+                let pad_scroll = 20.;
+                let rect = Rect{
+                    x:fe.rect.x+pad_scroll,
+                    y:fe.rect.y+pad_scroll,
+                    w:fe.rect.w-2.*pad_scroll,
+                    h:fe.rect.h-2.*pad_scroll,
+                };
+                let delta = Vec2{
+                    x:if fe.abs.x < rect.x{
+                        -((rect.x - fe.abs.x) * pow_scale).powf(pow_fac).min(max_speed)
+                    }
+                    else if fe.abs.x > rect.x + rect.w{
+                        ((fe.abs.x - (rect.x + rect.w)) * pow_scale).powf(pow_fac).min(max_speed)
+                    }
+                    else{
+                        0.
+                    },
+                    y:if fe.abs.y < rect.y{
+                        -((rect.y - fe.abs.y) * pow_scale).powf(pow_fac).min(max_speed)
+                    }
+                    else if fe.abs.y > rect.y + rect.h{
+                        ((fe.abs.y - (rect.y + rect.h)) * pow_scale).powf(pow_fac).min(max_speed)
+                    }
+                    else{
+                        0.
+                    }
+                };
+                let last_scroll_none = self._select_scroll.is_none();
+                if delta.x !=0. || delta.y != 0.{
+                   self._select_scroll = Some(SelectScroll{
+                       abs:fe.abs,
+                       delta:delta,
+                       at_end:false
+                   })
+                }
+                else{
+                    self._select_scroll = None;
+                }
+                if last_scroll_none{
+                    self.view.redraw_view_area(cx);
+                }
             },
             Event::KeyDown(ke)=>{
-                match ke.key_code{
+                let cursor_moved = match ke.key_code{
                     KeyCode::ArrowUp=>{
-                        self.cursors_move_up(1, ke.with_shift, text_buffer);
+                        self.cursors.move_up(1, ke.modifiers.shift, text_buffer);
+                        true
                     },
                     KeyCode::ArrowDown=>{
-                        self.cursors_move_down(1, ke.with_shift, text_buffer);
+                        self.cursors.move_down(1, ke.modifiers.shift, text_buffer);
+                        true
                     },
                     KeyCode::ArrowLeft=>{
-                        self.cursors_move_left(1, ke.with_shift, text_buffer);
+                        if ke.modifiers.logo || ke.modifiers.control{ // token skipping
+                            self.cursors.move_left_nearest_token(ke.modifiers.shift, &self._token_chunks, text_buffer)
+                        }
+                        else{
+                            self.cursors.move_left(1, ke.modifiers.shift, text_buffer);
+                        }
+                        true
                     },
                     KeyCode::ArrowRight=>{
-                        self.cursors_move_right(1, ke.with_shift, text_buffer);
+                        if ke.modifiers.logo || ke.modifiers.control{ // token skipping
+                            self.cursors.move_right_nearest_token(ke.modifiers.shift, &self._token_chunks, text_buffer)
+                        }
+                        else{
+                            self.cursors.move_right(1, ke.modifiers.shift, text_buffer);
+                        }
+                        true
                     },
-                    _=>()
+                    KeyCode::PageUp=>{
+                        
+                        self.cursors.move_up(self._visible_lines.max(5) - 4, ke.modifiers.shift, text_buffer);
+                        true
+                    },
+                    KeyCode::PageDown=>{
+                        self.cursors.move_down(self._visible_lines.max(5) - 4, ke.modifiers.shift, text_buffer);
+                        true
+                    },
+                    KeyCode::Home=>{
+                        self.cursors.move_home(ke.modifiers.shift, text_buffer);
+                        true
+                    },
+                    KeyCode::End=>{
+                        self.cursors.move_end(ke.modifiers.shift, text_buffer);
+                        true
+                    },
+                    KeyCode::Backspace=>{
+                        self.cursors.backspace(text_buffer);
+                        true
+                    },
+                    KeyCode::Delete=>{
+                        self.cursors.delete(text_buffer);
+                        true
+                    },
+                    KeyCode::KeyZ=>{
+                        if ke.modifiers.logo || ke.modifiers.control{
+                            if ke.modifiers.shift{ // redo
+                                text_buffer.redo(true, &mut self.cursors);
+                                true
+                            }
+                            else{ // undo
+                                text_buffer.undo(true, &mut self.cursors);
+                                true
+                            }
+                        }
+                        else{
+                            false
+                        }
+                    },
+                    KeyCode::KeyX=>{ // cut, the actual copy comes from the TextCopy event from the platform layer
+                        if ke.modifiers.logo || ke.modifiers.control{ // cut
+                            self.cursors.replace_text("", text_buffer);
+                            true
+                        }
+                        else{
+                            false
+                        }
+                    },
+                    KeyCode::KeyA=>{ // select all
+                        if ke.modifiers.logo || ke.modifiers.control{ // cut
+                            self.cursors.select_all(text_buffer);
+                            // don't scroll!
+                            self.view.redraw_view_area(cx);
+                            false
+                        }
+                        else{
+                            false
+                        }
+                    },
+                    KeyCode::Escape=>{
+                        self.do_code_folding(cx);
+                        false
+                    },
+                    KeyCode::Alt=>{
+                        // how do we find the center line of the view
+                        // its simply the top line
+                        self.do_code_folding(cx);
+                        false
+                        //return CodeEditorEvent::FoldStart
+                    },
+                    KeyCode::Tab=>{
+                        if ke.modifiers.shift{
+                            //self.cursors.remove_tab(text_buffer);
+                        }
+                        else{
+                            self.cursors.insert_tab(text_buffer,"    ");
+                        }
+                        true
+                    },
+                    _=>false
+                };
+                if cursor_moved{
+                    self.scroll_last_cursor_visible(cx, text_buffer);
+                    self.view.redraw_view_area(cx);
+                }
+            },
+            Event::KeyUp(ke)=>{
+                match ke.key_code{
+                    KeyCode::Alt=>{
+                        self.do_code_unfolding(cx);
+                    },
+                    KeyCode::Escape=>{
+                        self.do_code_unfolding(cx);
+                    }
+                    _=>(),
                 }
             },
             Event::TextInput(te)=>{
-                println!("TextInput {:?}", te);
-            }
+                if te.replace_last{
+                    text_buffer.undo(false, &mut self.cursors);
+                }
+                
+                if !te.was_paste && te.input.len() == 1{
+                    match te.input.chars().next().unwrap(){
+                        '\n'=>{
+                            self.cursors.insert_newline_with_indent(text_buffer);
+                        },
+                        '('=>{
+                            self.cursors.insert_around("(",")",text_buffer);
+                        },
+                        '['=>{
+                            self.cursors.insert_around("[","]",text_buffer);
+                        },
+                        '{'=>{
+                            self.cursors.insert_around("{","}",text_buffer);
+                        },
+                        ')'=>{
+                            self.cursors.overwrite_if_exists(")", text_buffer);
+                        },
+                        ']'=>{
+                            self.cursors.overwrite_if_exists("]", text_buffer);
+                        },
+                        '}'=>{
+                            self.cursors.overwrite_if_exists("}", text_buffer);
+                        },
+                        _=>{
+                            self.cursors.replace_text(&te.input, text_buffer);
+                        }
+                    }  
+                    // lets insert a newline
+                } 
+                else{
+                    self.cursors.replace_text(&te.input, text_buffer);
+                }
+                self.scroll_last_cursor_visible(cx, text_buffer);
+                self.view.redraw_view_area(cx);
+            },
+            Event::TextCopy(_)=>match event{ // access the original event
+                Event::TextCopy(req)=>{
+                    req.response = Some(self.cursors.get_all_as_string(text_buffer));
+                },
+                _=>()
+            },
             _=>()
         };
         CodeEditorEvent::None
    }
+
+    pub fn do_code_folding(&mut self, cx:&mut Cx){
+        // start code folding anim
+        let speed = 0.98;
+        self._anim_folding.state.do_folding(speed, 0.95);
+        self._anim_folding.first_visible = self.compute_first_visible_line(cx);
+        self.view.redraw_view_area(cx);
+    }
+
+    pub fn do_code_unfolding(&mut self, cx:&mut Cx){
+        let speed = 0.96;
+        self._anim_folding.state.do_opening(speed, 0.97);
+        self._anim_folding.first_visible = self.compute_first_visible_line(cx);
+        self.view.redraw_view_area(cx);
+        // return to normal size
+    }
 
     pub fn begin_code_editor(&mut self, cx:&mut Cx, text_buffer:&TextBuffer)->bool{
         // pull the bg color from our animation system, uses 'default' value otherwise
@@ -153,37 +666,222 @@ impl CodeEditor{
         //}
         if text_buffer.load_id != 0{
             let bg_inst = self.bg.begin_quad(cx, &Layout{
-                align:Align::center(),
+                align:Align::left_top(),
                 ..self.bg_layout.clone()
             });
-            self.text.draw_text(cx, "Loading ...");
+            self.text.color = color("#666");
+            self.text.draw_text(cx, "...");
             self.bg.end_quad(cx, &bg_inst);
-            self._bg_area = bg_inst.get_area();
+            self._bg_area = bg_inst.into_area();
             self.view.end_view(cx);
             return false
         }
         else{
-            let bg_inst =self.bg.draw_quad(cx, 0.,0., cx.width_total(false), cx.height_total(false));
-            self._bg_area = bg_inst.get_area();
+
+            let bg_inst = self.bg.draw_quad(cx, Rect{x:0.,y:0., w:cx.width_total(false), h:cx.height_total(false)});
+            let bg_area = bg_inst.into_area();
+            cx.update_area_refs(self._bg_area, bg_area);
+            self._bg_area = bg_area;
+            // makers before text
+            cx.new_instance_layer(self.marker.shader_id, 0);
 
             self._text_inst = Some(self.text.begin_text(cx));
             self._instance_count = 0;
-            self._scroll = self.view.get_scroll(cx);
-            self._monospace_size = self.text.get_monospace_size(cx);
+   
+            if let Some(select_scroll) = &mut self._select_scroll{
+                let scroll_pos = self.view.get_scroll_pos(cx);
+                if self.view.set_scroll_pos(cx, Vec2{
+                    x:scroll_pos.x + select_scroll.delta.x,
+                    y:scroll_pos.y + select_scroll.delta.y
+                }){
+                    self.view.redraw_view_area(cx);
+                }
+                else{
+                    select_scroll.at_end = true;
+                }
+            }
+
+            self._scroll_pos = self.view.get_scroll_pos(cx);
+
+            self._monospace_size = self.text.get_monospace_size(cx, None);
+            self._line_geometry.truncate(0);
+            self._token_chunks.truncate(0);
+            self._draw_cursor = DrawCursor::new();
+            self._first_on_line = true;
+            self._visible_lines = 0;
+
+            let anim_folding = &mut self._anim_folding;
+            if anim_folding.state.is_animating(){
+                anim_folding.state.next_anim_step();
+                if anim_folding.state.is_animating(){
+                    self.view.redraw_view_area(cx);
+                }
+                anim_folding.did_animate = true;
+            }
+            else{
+                anim_folding.did_animate = false;
+            }
+           
+            self._paren_stack.truncate(0);
+            self._anim_font_size = anim_folding.state.get_font_size(self.open_font_size, self.folded_font_size);
+
+            self._draw_cursor.set_next(&self.cursors.set);
+            // cursor after text
+            cx.new_instance_layer(self.cursor.shader_id, 0);
             
             return true
         }
     }
     
     pub fn end_code_editor(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
+
+        // lets insert an empty newline at the bottom so its nicer to scroll
+        self.new_line(cx);
+        //cx.turtle_new_line();
+        cx.walk_turtle(Bounds::Fix(0.0),  Bounds::Fix(self._monospace_size.y),  Margin::zero(), None);
+        
         self.text.end_text(cx, self._text_inst.as_ref().unwrap());
+        // lets draw cursors and selection rects.
+        //let draw_cursor = &self._draw_cursor;
+        let pos = cx.turtle_origin();
+        cx.new_instance_layer(self.cursor.shader_id, 0);
+
+        // draw the cursors    
+        for rc in &self._draw_cursor.cursors{
+           self.cursor.draw_quad(cx, Rect{x:rc.x - pos.x, y:rc.y - pos.y, w:rc.w, h:rc.h});
+        }
+
+        self._text_area = self._text_inst.take().unwrap().inst.into_area();
+
+        // draw selections
+        let sel = &mut self._draw_cursor.selections;
+
+        // do silly selection animations
+        if !self._anim_folding.state.is_animating(){
+            let mut anim_select_any = false;
+            for i in 0..sel.len(){
+                let cur = &mut sel[i];
+                let start_time = if self._select_scroll.is_none() && !self._last_finger_move.is_none(){1.}else{0.};
+                // silly selection animation start
+                if i < self._anim_select.len() &&  cur.rc.y < self._anim_select[i].ypos{
+                    // insert new one at the top
+                    self._anim_select.insert(i, AnimSelect{time:start_time, invert:true, ypos:cur.rc.y});
+                }
+                let (wtime, htime, invert) = if i < self._anim_select.len(){
+                    let len = self._anim_select.len()-1;
+                    let anim = &mut self._anim_select[i];
+                    anim.ypos = cur.rc.y;
+                    if anim.time <= 0.0001{
+                        anim.time = 0.0
+                    }
+                    else{
+                        anim.time = anim.time *0.55;//= 0.1;
+                        anim_select_any = true;
+                    }
+                    if i == len{
+                        (anim.time, anim.time, i == 0 && anim.invert)
+                    }
+                    else{
+                        (anim.time, 0., i == 0 && anim.invert)
+                    }
+                }
+                else{
+                    self._anim_select.push(AnimSelect{time:start_time,invert:i == 0, ypos:cur.rc.y});
+                    anim_select_any = true;
+                    (start_time,start_time,false)
+                };
+                let wtime = 1.0 - wtime as f32;
+                let htime = 1.0 - htime as f32;
+                
+                if invert{
+                    cur.rc.w = cur.rc.w * wtime;
+                    cur.rc.h = cur.rc.h * htime;
+                }
+                else{
+                    cur.rc.x = cur.rc.x + (cur.rc.w * (1.-wtime));
+                    cur.rc.w = cur.rc.w * wtime;
+                    cur.rc.h = cur.rc.h * htime;
+                }
+            }
+            self._anim_select.truncate(sel.len());
+            if anim_select_any{
+                self.view.redraw_view_area(cx);        
+            }
+        }
+
+        // draw selections
+        for i in 0..sel.len(){
+            let cur = &sel[i];
+            
+            let mk_inst = self.marker.draw_quad(cx, Rect{x:cur.rc.x - pos.x, y:cur.rc.y - pos.y, w:cur.rc.w, h:cur.rc.h});
+
+            // do we have a prev?
+            if i > 0 && sel[i-1].index == cur.index{
+                let p_rc = &sel[i-1].rc;
+                mk_inst.push_vec2(cx, Vec2{x:p_rc.x - cur.rc.x, y:p_rc.w}); // prev_x, prev_w
+            }
+            else{
+                mk_inst.push_vec2(cx, Vec2{x:0., y:-1.}); // prev_x, prev_w
+            }
+            // do we have a next
+            if i < sel.len() - 1 && sel[i+1].index == cur.index{
+                let n_rc = &sel[i+1].rc;
+                mk_inst.push_vec2(cx, Vec2{x:n_rc.x - cur.rc.x, y:n_rc.w}); // prev_x, prev_w
+            }
+            else{
+                mk_inst.push_vec2(cx, Vec2{x:0., y:-1.}); // prev_x, prev_w
+            }
+        }
+        
+         // code folding
+        if self._anim_folding.state.is_folded(){
+            // lets give the view a whole extra page of space
+            cx.walk_turtle(Bounds::Fix(0.0),  Bounds::Fix(cx.height_total(false)),  Margin::zero(), None);
+        }
+
+        // do select scrolling
+        if let Some(select_scroll) = self._select_scroll.clone(){
+            if let Some(grid_select_corner) = self._grid_select_corner{
+               // self.cursors.grid_select(offset, text_buffer);
+                let pos = self.compute_grid_text_pos_from_abs(cx, select_scroll.abs);
+                self.cursors.grid_select(grid_select_corner, pos, text_buffer);
+            }
+            else{
+                let offset = self.text.find_closest_offset(cx, &self._text_area, select_scroll.abs);
+                self.cursors.set_last_cursor_head(offset, text_buffer);
+            }
+            if select_scroll.at_end{
+                self._select_scroll = None;
+            }
+        }
+
+        // place the IME
+        if self._bg_area == cx.key_focus{
+            if let Some(last_cursor) = self._draw_cursor.last_cursor{
+                let rc = self._draw_cursor.cursors[last_cursor];
+                let scroll_pos = self.view.get_scroll_pos(cx);
+                cx.show_text_ime(rc.x - scroll_pos.x, rc.y - scroll_pos.y);
+            }
+            else{ // current last cursors is not visible
+                cx.hide_text_ime();
+            }
+        }
+        
         self.view.end_view(cx);
+
+        if self._anim_folding.did_animate{
+            // update scroll_pos
+            self.view.set_scroll_pos(cx, self._scroll_pos);
+        }
     }
 
     pub fn draw_tab_lines(&mut self, cx:&mut Cx, tabs:usize){
         let walk = cx.get_turtle_walk();
         let tab_width = self._monospace_size.x*4.;
-        if cx.visible_in_turtle(&Rect{x:walk.x, y:walk.y, w:tab_width * tabs as f32, h:self._monospace_size.y}, &self._scroll){
+        if cx.visible_in_turtle(
+            Rect{x:walk.x, y:walk.y, w:tab_width * tabs as f32, h:self._monospace_size.y}, 
+            self._scroll_pos,
+        ){
             for _i in 0..tabs{
                 self.tab.draw_quad_walk(cx, Bounds::Fix(tab_width), Bounds::Fix(self._monospace_size.y), Margin::zero());
             }   
@@ -191,145 +889,340 @@ impl CodeEditor{
         }
     }
 
-    pub fn new_line(&mut self, cx:&mut Cx){
-        cx.turtle_new_line();
+    // set it once per line otherwise the LineGeom stuff isn't really working out.
+    pub fn set_font_size(&mut self, cx:&Cx, font_size:f32){
+        self.text.font_size = font_size;
+        if font_size > self._line_largest_font{
+            self._line_largest_font = font_size;
+        }
+        self._monospace_size = self.text.get_monospace_size(cx, None);
     }
 
-    pub fn draw_text(&mut self, cx:&mut Cx, chunk:&Vec<char>, color:&Vec4){
+    pub fn new_line(&mut self, cx:&mut Cx){
+        // line geometry is used for scrolling look up of cursors
+        self._line_geometry.push(
+            LineGeom{
+                walk:cx.get_rel_turtle_walk(),
+                font_size:self._line_largest_font
+            }
+        );
+        self._line_largest_font = self.text.font_size;
+        // add a bit of room to the right
+        cx.walk_turtle(
+            Bounds::Fix(self._monospace_size.x * 3.), 
+            Bounds::Fix(self._monospace_size.y), 
+            Margin::zero(),
+            None
+        );
+        cx.turtle_new_line();
+        self._first_on_line = true;
+        let mut draw_cursor = &mut self._draw_cursor;
+        if !draw_cursor.first{ // we have some selection data to emit
+           draw_cursor.emit_selection(true);
+           draw_cursor.first = true;
+        }
+
+        // we could modify our visibility window here by computing the DY we are going to have the moment we know it
+        if self._anim_folding.did_animate{
+            let (line, pos) = self._anim_folding.first_visible;
+            if line == self._line_geometry.len(){ // the line is going to be the next one
+                let walk = cx.get_rel_turtle_walk();
+                let dy =  pos - walk.y;
+                self._scroll_pos = Vec2{
+                    x:self._scroll_pos.x,
+                    y:self._scroll_pos.y - dy
+                };
+                // update the line pos
+                self._anim_folding.first_visible = (line, walk.y);
+           }
+        }
+
+
+    }
+
+    pub fn push_paren_stack(&mut self, cx:&Cx, paren_type:ParenType){
+        self._paren_stack.push(ParenItem{
+            start:self._token_chunks.len(),
+            end:0,
+            paren_type:paren_type.clone()
+        });
+        if self._paren_stack.len() == 2 && paren_type == ParenType::Curly{ // one level down
+            self.set_font_size(cx, self._anim_font_size);
+        }
+    }
+
+    pub fn pop_paren_stack(&mut self, cx:&Cx, paren_type:ParenType){
+        if self._paren_stack.len()>0{
+            let mut paren_item = self._paren_stack.pop().unwrap();
+            if paren_item.paren_type == paren_type{
+                paren_item.end = self._token_chunks.len();
+                self._paren_list.push(paren_item);
+            }
+        }
+        if self._paren_stack.len() == 1{ // root level
+            self.set_font_size(cx, self.open_font_size);
+        }
+    }
+
+    pub fn draw_text(&mut self, cx:&mut Cx, chunk:&mut Vec<char>, end_offset:usize, is_whitespace:bool, color:Color){
         if chunk.len()>0{
+
+            self._token_chunks.push(TokenChunk{
+                offset:end_offset - chunk.len() - 1,
+                len:chunk.len(),
+                is_whitespace:is_whitespace,
+            });
+            
             let geom = cx.walk_turtle(
                 Bounds::Fix(self._monospace_size.x * (chunk.len() as f32)), 
                 Bounds::Fix(self._monospace_size.y), 
                 Margin::zero(),
                 None
             );
-
-            // we need to walk our cursor iterator, 
-                
+            
             // lets check if the geom is visible
-            if cx.visible_in_turtle(&geom, &self._scroll){
-                self.text.color = *color;
-                self.text.add_text(cx, geom.x, geom.y, self._text_inst.as_mut().unwrap(), &chunk);
+            if cx.visible_in_turtle(geom, self._scroll_pos){
+
+                 if self._first_on_line{
+                    self._first_on_line = false;
+                    self._visible_lines += 1;
+                }
+
+                self.text.color = color;
+                // we need to find the next cursor point we need to do something at
+                let cursors = &self.cursors.set;
+                let last_cursor = self.cursors.last_cursor;
+                let draw_cursor = &mut self._draw_cursor;
+                let height = self._monospace_size.y;
+
+                self.text.add_text(cx, geom.x, geom.y, end_offset - chunk.len() - 1, self._text_inst.as_mut().unwrap(), &chunk, |unicode, offset, x, w|{
+                    // check if we need to skip cursors
+                    while offset >= draw_cursor.end{ // jump to next cursor
+                        if offset == draw_cursor.end{ // process the last bit here
+                             draw_cursor.process_geom(last_cursor, offset, x, geom.y, w, height);
+                            draw_cursor.emit_selection(false);
+                        }
+                        if !draw_cursor.set_next(cursors){ // cant go further
+                            return 0.0
+                        }
+                    }
+                    // in current cursor range, update values
+                    if offset >= draw_cursor.start && offset <= draw_cursor.end{
+                        draw_cursor.process_geom(last_cursor, offset, x, geom.y, w, height);
+                        if offset == draw_cursor.end{
+                            draw_cursor.emit_selection(false);
+                        }
+                        if unicode == 10{
+                            return 0.0
+                        }
+                        else if unicode == 32 && offset < draw_cursor.end{
+                            return 2.0
+                        }
+                    }
+                    return 0.0
+                });
             }
 
             self._instance_count += chunk.len();
         }
     }
 
-    pub fn cursors_merge(&mut self){
-        // merge all cursors
-    }
-
-    pub fn cursors_move_up(&mut self, line_count:usize, only_head:bool, text_buffer:&TextBuffer){
-        for cursor in &mut self.cursors{
-            cursor.move_up(line_count, text_buffer);
-            if !only_head{cursor.tail = cursor.head}
+   fn scroll_last_cursor_to_top(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
+       // ok lets get the last cursor pos
+       let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
+       // lets find the line offset in the line geometry
+       if pos.row < self._line_geometry.len(){
+           let geom = &self._line_geometry[pos.row.max(1) - 1];
+           // ok now we want the y scroll to be geom.y
+           self.view.set_scroll_target(cx, Vec2{x:0.0,y:geom.walk.y});
+       }
+   }
+ 
+    fn scroll_last_cursor_visible(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
+        // so we have to compute (approximately) the rect of our cursor
+        if self.cursors.last_cursor >= self.cursors.set.len(){
+            panic!("LAST CURSOR INVALID");
         }
-        self.cursors_merge()
-    }
-
-    pub fn cursors_move_down(&mut self,line_count:usize, only_head:bool, text_buffer:&TextBuffer){
-        for cursor in &mut self.cursors{
-            cursor.move_down(line_count, text_buffer);
-            if !only_head{cursor.tail = cursor.head}
+        //let offset = self.cursors.set[self.cursors.last_cursor].head;
+        let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
+        //text_buffer.offset_to_text_pos(offset);
+        // alright now lets query the line geometry
+        let row = pos.row.min(self._line_geometry.len()-1);
+        if row < self._line_geometry.len(){
+            let geom = &self._line_geometry[row];
+            let mono_size = self.text.get_monospace_size(cx, Some(geom.font_size));
+            let rect = Rect{
+                x:(pos.col as f32) * mono_size.x,
+                y:geom.walk.y - mono_size.y * 1.,
+                w:mono_size.x * 4.,
+                h:mono_size.y * 4.
+            };
+            // scroll this cursor into view
+            self.view.scroll_into_view(cx, rect);
         }
-        self.cursors_merge()
     }
 
-    pub fn cursors_move_left(&mut self, char_count:usize, only_head:bool, text_buffer:&TextBuffer){
-        for cursor in &mut self.cursors{
-            cursor.move_left(char_count, text_buffer);
-            if !only_head{cursor.tail = cursor.head}
+    fn compute_grid_text_pos_from_abs(&mut self, cx:&Cx, abs:Vec2)->TextPos{
+        // 
+        let rel = self._bg_area.abs_to_rel_scrolled(cx, abs);
+        let mut mono_size = Vec2::zero();
+        for (row, geom) in self._line_geometry.iter().enumerate(){
+            //let geom = &self._line_geometry[pos.row];
+            mono_size = self.text.get_monospace_size(cx, Some(geom.font_size));
+            if rel.y < geom.walk.y || rel.y >= geom.walk.y && rel.y <= geom.walk.y + mono_size.y{ // its on the right line
+                let col = (rel.x.max(0.) / mono_size.x) as usize; // do a dumb calc
+                return TextPos{row:row, col:col};
+            }
         }
-        self.cursors_merge()
+        // otherwise the file is too short, lets use the last line
+        TextPos{row:self._line_geometry.len() - 1, col: (rel.x.max(0.) / mono_size.x) as usize}
     }
 
-    pub fn cursors_move_right(&mut self,char_count:usize, only_head:bool, text_buffer:&TextBuffer){
-        for cursor in &mut self.cursors{
-            cursor.move_left(char_count, text_buffer);
-            if !only_head{cursor.tail = cursor.head}
+    fn compute_first_visible_line(&self, cx:&Cx)->(usize,f32){
+        let scroll = self.view.get_scroll_pos(cx);
+        let mut last_y = 0.0;
+        for (line, geom) in self._line_geometry.iter().enumerate(){
+            if geom.walk.y >= scroll.y{
+                if line>0{
+                    return (line - 1, last_y)
+                }
+                return (line, geom.walk.y)
+            }
+            last_y = geom.walk.y;
         }
-        self.cursors_merge()
+        return (0,0.0)
     }
 
-    pub fn cursors_replace_text(&mut self, text:&str, text_buffer:&mut TextBuffer){
+    fn get_nearest_token_chunk_range(&self, offset:usize)->(usize, usize){
+        let chunks = &self._token_chunks;
+        for i in 0..chunks.len(){
+            if chunks[i].is_whitespace{
+                if offset == chunks[i].offset && i > 0{ // at the start of whitespace
+                    return (chunks[i-1].offset, chunks[i-1].len)
+                }
+                else if offset == chunks[i].offset + chunks[i].len && i < chunks.len()-1{
+                    return (chunks[i+1].offset, chunks[i+1].len)
+                }
+            };
 
+            if offset >= chunks[i].offset && offset < chunks[i].offset + chunks[i].len{
+                return (chunks[i].offset, chunks[i].len)
+            }
+        };
+        (0,0)
     }
+
+}
+
+
+#[derive(Clone)]
+pub struct DrawSel{
+    index:usize,
+    rc:Rect,
 }
 
 #[derive(Clone)]
-pub struct Cursor{
-    head:usize,
-    tail:usize,
-    max:usize
+pub struct DrawCursor{
+    pub head:usize,
+    pub start:usize,
+    pub end:usize,
+    pub next_index:usize,
+    pub left_top:Vec2,
+    pub right_bottom:Vec2,
+    pub last_w:f32,
+    pub first:bool,
+    pub empty:bool,
+    pub cursors:Vec<Rect>,
+    pub last_cursor:Option<usize>,
+    pub selections:Vec<DrawSel>
 }
 
-impl Cursor{
-    pub fn has_selection(&self)->bool{
-        self.head != self.tail
+impl DrawCursor{
+    pub fn new()->DrawCursor{
+        DrawCursor{
+            start:0,
+            end:0,
+            head:0,
+            first:true,
+            empty:true,
+            next_index:0,
+            left_top:Vec2::zero(),
+            right_bottom:Vec2::zero(),
+            last_w:0.0,
+            cursors:Vec::new(),
+            selections:Vec::new(),
+            last_cursor:None
+        }
     }
 
-    pub fn sort(&self)->(usize,usize){
-        if self.head > self.tail{
-            (self.tail,self.head)
+    pub fn set_next(&mut self, cursors:&Vec<Cursor>)->bool{
+        if self.next_index < cursors.len(){
+            self.emit_selection(false);
+            let cursor = &cursors[self.next_index];
+            let (start,end) = cursor.order();
+            self.start = start;
+            self.end = end;
+            self.head = cursor.head;
+            self.next_index += 1;
+            self.last_w = 0.0;
+            self.right_bottom.y = 0.;
+            self.first = true;
+            self.empty = true;
+            true
         }
         else{
-            (self.head,self.tail)
+            false
         }
     }
 
-    pub fn calc_max(&mut self, text_buffer:&TextBuffer){
-        let (_row,col) = text_buffer.offset_to_row_col(self.head);
-        self.max = col;
+    pub fn emit_cursor(&mut self, x:f32, y:f32, h:f32){
+        self.cursors.push(Rect{
+            x:x,
+            y:y,
+            w:1.5,
+            h:h
+        })
     }
 
-    pub fn move_home(&mut self, text_buffer:&TextBuffer){
-        self.head = 0;
-        self.calc_max(text_buffer);
+    pub fn emit_selection(&mut self, on_new_line:bool){
+        if !self.first{
+            self.first = true;
+            if !self.empty || on_new_line{
+                self.selections.push(DrawSel{
+                    index:self.next_index - 1,
+                    rc:Rect{
+                        x:self.left_top.x,
+                        y:self.left_top.y,
+                        w:(self.right_bottom.x - self.left_top.x) + if on_new_line{self.last_w} else {0.0},
+                        h:self.right_bottom.y - self.left_top.y
+                    }
+                })
+            }
+            self.right_bottom.y = 0.;
+        }
     }
 
-    pub fn move_end(&mut self, text_buffer:&TextBuffer){
-        self.head = text_buffer.get_char_count();
-        self.calc_max(text_buffer);
-    }
-
-    pub fn move_left(&mut self, char_count:usize,  text_buffer:&TextBuffer){
-        if self.head >= char_count{
-            self.head -= char_count;
+    pub fn process_geom(&mut self, last_cursor:usize, offset:usize, x:f32, y:f32, w:f32, h:f32){
+        if offset == self.head{ // emit a cursor
+            if self.next_index - 1 == last_cursor{
+                self.last_cursor = Some(self.cursors.len());
+            }
+            self.emit_cursor(x, y, h);
+        }
+        if self.first{ // store left top of rect
+            self.first = false;
+            self.left_top.x = x;
+            self.left_top.y = y;
+            self.empty = true;
         }
         else{
-            self.head = 0;
+            self.empty = false;
         }
-        self.calc_max(text_buffer);
-    }
-
-    pub fn move_right(&mut self, char_count:usize, text_buffer:&TextBuffer){
-        if self.head + char_count < text_buffer.get_char_count(){
-            self.head += char_count;
-        }
-        else{
-            self.head = text_buffer.get_char_count();
-        }
-        self.calc_max(text_buffer);
-    }
-
-    pub fn move_up(&mut self, line_count:usize, text_buffer:&TextBuffer){
-        let (row,_col) = text_buffer.offset_to_row_col(self.head);
-        if row >= line_count {
-            self.head = text_buffer.row_col_to_offset(row - line_count, self.max);
-        }
-        else{
-            self.head = 0;
-        }
-    }
-    
-    pub fn move_down(&mut self, line_count:usize, text_buffer:&TextBuffer){
-        let (row,_col) = text_buffer.offset_to_row_col(self.head);
-        if row + line_count < text_buffer.get_line_count(){
-            self.head = text_buffer.row_col_to_offset(row + line_count, self.max);
-        }
-        else{
-            self.head = text_buffer.get_char_count();
+        // current right/bottom
+        self.last_w = w;
+        self.right_bottom.x = x;
+        if y + h > self.right_bottom.y{
+            self.right_bottom.y = y + h;
         }
     }
 }

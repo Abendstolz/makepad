@@ -1,11 +1,11 @@
 [package]
-name = "makepad_webgl"
+name = "example_webgl"
 version = "0.1.0"
 authors = ["arc"]
 edition = "2018"
 
 [lib]
-path = "../src/main.rs"
+path = "../src/example.rs"
 crate-type = ["cdylib"]
 
 [profile.release]

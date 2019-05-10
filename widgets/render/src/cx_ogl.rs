@@ -66,8 +66,8 @@ impl Cx {
             gl::BlendEquationSeparate(gl::FUNC_ADD, gl::FUNC_ADD);
             gl::BlendFuncSeparate(gl::ONE, gl::ONE_MINUS_SRC_ALPHA, gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
             gl::Enable(gl::BLEND);
-            gl::ClearColor(self.clear_color.x, self.clear_color.y, self.clear_color.z, self.clear_color.w);
-            gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
+            gl::ClearColor(self.clear_color.r, self.clear_color.g, self.clear_color.b, self.clear_color.a);
+            gl::Clear(gl::COLOR_BUFFER_BIT|gl::DEPTH_BUFFER_BIT);
         }
         self.prepare_frame();
         self.exec_draw_list(0);
@@ -195,15 +195,18 @@ impl Cx {
         let mut out = Vec::new();
         for i in 0..self.platform.fingers_down.len() {
             let down = self.platform.fingers_down[i];
-            if down {
-                out.push(Event::FingerMove(FingerMoveEvent {
-                    abs: self.platform.last_mouse_pos,
-                    digit: i,
-                    rel: self.platform.last_mouse_pos,
-                    abs_start: vec2(0., 0.),
-                    rel_start: vec2(0., 0.),
-                    is_over: false,
-                    is_touch: false,
+            if down{
+                out.push(Event::FingerMove(FingerMoveEvent{
+                    modifiers:KeyModifiers{..Default::default()},
+                    abs:self.platform.last_mouse_pos,
+                    rel:self.platform.last_mouse_pos,
+                    rect:Rect::zero(),
+                    digit:i,
+                    abs_start:Vec2::zero(),
+                    rel_start:Vec2::zero(),
+                    is_over:false,
+                    is_touch:false,
+                    time:0.0
                 }))
             }
         };
@@ -274,37 +277,43 @@ impl Cx {
                 }
                 _ => ()
             },
-            winit::Event::WindowEvent { event, .. } => match event {
-                winit::WindowEvent::ReceivedCharacter(chr) => {
-                    println!("GOT CHARACTER {}", chr);
-                }
-                winit::WindowEvent::MouseWheel { delta, .. } => {
-                    return vec![Event::FingerScroll(FingerScrollEvent {
-                        abs: self.platform.last_mouse_pos,
-                        rel: self.platform.last_mouse_pos,
-                        handled: false,
-                        scroll: vec2(
-                            match delta {
-                                winit::MouseScrollDelta::LineDelta(dx, _dy) => -dx * 32.0,
-                                winit::MouseScrollDelta::PixelDelta(pp) => pp.x as f32
-                            },
-                            match delta {
-                                winit::MouseScrollDelta::LineDelta(_dx, dy) => -dy * 32.0,
-                                winit::MouseScrollDelta::PixelDelta(pp) => pp.y as f32
-                            },
-                        ),
-                    })];
-                }
-                winit::WindowEvent::CursorMoved { position, .. } => {
+            winit::Event::WindowEvent{ event, .. } => match event {
+                winit::WindowEvent::ReceivedCharacter(chr)=>{
+                    //println!("GOT CHARACTER {}", chr);
+                },
+                winit::WindowEvent::MouseWheel{delta, ..}=>{
+                    let (x, xis_wheel) = match delta{
+                        winit::MouseScrollDelta::LineDelta(dx,_dy)=>(-dx*32.0, true),
+                        winit::MouseScrollDelta::PixelDelta(pp)=>(-pp.x as f32, false)
+                    };
+                    let (y, yis_wheel) = match delta{
+                        winit::MouseScrollDelta::LineDelta(_dx,dy)=>(-dy*32.0, true),
+                        winit::MouseScrollDelta::PixelDelta(pp)=>(-pp.y as f32, false)
+                    };
+                    return vec![Event::FingerScroll(FingerScrollEvent{
+                        modifiers:KeyModifiers{..Default::default()},
+                        abs:self.platform.last_mouse_pos,
+                        rel:self.platform.last_mouse_pos,
+                        rect:Rect::zero(),
+                        is_wheel:yis_wheel || xis_wheel,
+                        handled:false,
+                        scroll:Vec2{x:x, y:y},
+                        time:0.0
+                    })]
+                },
+                winit::WindowEvent::CursorMoved{position,..}=>{
                     self.platform.is_cursor_in_window = true;
-                    self.platform.last_mouse_pos = vec2(position.x as f32, position.y as f32);
+                    self.platform.last_mouse_pos = Vec2{x:position.x as f32, y:position.y as f32};
                     self.hover_mouse_cursor = None;
                     let mut events = self.make_mouse_move_events();
-                    events.push(Event::FingerHover(FingerHoverEvent {
-                        abs: self.platform.last_mouse_pos,
-                        rel: self.platform.last_mouse_pos,
-                        handled: false,
-                        hover_state: HoverState::Over,
+                    events.push(Event::FingerHover(FingerHoverEvent{
+                        abs:self.platform.last_mouse_pos,
+                        rel:self.platform.last_mouse_pos,
+                        rect:Rect::zero(),
+                        modifiers:KeyModifiers{..Default::default()},
+                        handled:false,
+                        hover_state:HoverState::Over,
+                        time:0.0
                     }));
                     return events;
                 }
@@ -317,42 +326,51 @@ impl Cx {
                 winit::WindowEvent::CursorLeft { .. } => {
                     self.platform.is_cursor_in_window = false;
                     self.hover_mouse_cursor = None;
-                    // fire a hover out on our last known mouse position
-                    return vec![Event::FingerHover(FingerHoverEvent {
-                        abs: self.platform.last_mouse_pos,
-                        rel: self.platform.last_mouse_pos,
-                        handled: false,
-                        hover_state: HoverState::Out,
-                    })];
+                   // fire a hover out on our last known mouse position
+                    return vec![Event::FingerHover(FingerHoverEvent{
+                        modifiers:KeyModifiers{..Default::default()},
+                        abs:self.platform.last_mouse_pos,
+                        rel:self.platform.last_mouse_pos,
+                        rect:Rect::zero(),
+                        handled:false,
+                        hover_state:HoverState::Out,
+                        time:0.0
+                    })]
 
-                }
-                winit::WindowEvent::MouseInput { state, button, .. } => {
-                    match state {
-                        winit::ElementState::Pressed => {
-                            let mut digit = match button {// this makes sure that single touch mode doesnt allow multiple mousedowns
-                                winit::MouseButton::Left => 0,
-                                winit::MouseButton::Right => 1,
-                                winit::MouseButton::Middle => 2,
-                                winit::MouseButton::Other(id) => id as usize
+                },
+                winit::WindowEvent::MouseInput{state,button,..}=>{
+                    match state{
+                        winit::ElementState::Pressed=>{
+                            let mut digit = match button{// this makes sure that single touch mode doesnt allow multiple mousedowns
+                                winit::MouseButton::Left=>0,
+                                winit::MouseButton::Right=>1,
+                                winit::MouseButton::Middle=>2,
+                                winit::MouseButton::Other(id)=>id as usize
                             };
                             if digit >= self.captured_fingers.len() {
                                 digit = 0;
                             };
                             self.platform.fingers_down[digit] = true;
-                            return vec![Event::FingerDown(FingerDownEvent {
-                                abs: self.platform.last_mouse_pos,
-                                rel: self.platform.last_mouse_pos,
-                                handled: false,
-                                digit: digit,
-                                is_touch: false,
-                            })];
-                        }
-                        winit::ElementState::Released => {
-                            let mut digit = match button {// this makes sure that single touch mode doesnt allow multiple mousedowns
-                                winit::MouseButton::Left => 0,
-                                winit::MouseButton::Right => 1,
-                                winit::MouseButton::Middle => 2,
-                                winit::MouseButton::Other(id) => id as usize
+
+                            return vec![Event::FingerDown(FingerDownEvent{
+                                modifiers:KeyModifiers{..Default::default()},
+                                abs:self.platform.last_mouse_pos,
+                                rel:self.platform.last_mouse_pos,
+                                rect:Rect::zero(),
+                                handled:false,
+                                digit:digit,
+                                is_touch:false,
+                                tap_count:1,
+                                time:0.0
+                            })]
+                        },
+                        winit::ElementState::Released=>{
+
+                            let mut digit = match button{// this makes sure that single touch mode doesnt allow multiple mousedowns
+                                winit::MouseButton::Left=>0,
+                                winit::MouseButton::Right=>1,
+                                winit::MouseButton::Middle=>2,
+                                winit::MouseButton::Other(id)=>id as usize
                             };
                             if digit >= self.captured_fingers.len() {
                                 digit = 0;
@@ -362,15 +380,18 @@ impl Cx {
                             if !self.platform.fingers_down.iter().any(|down| *down) {
                                 self.down_mouse_cursor = None;
                             }
-                            return vec![Event::FingerUp(FingerUpEvent {
-                                abs: self.platform.last_mouse_pos,
-                                rel: self.platform.last_mouse_pos,
-                                abs_start: vec2(0., 0.),
-                                rel_start: vec2(0., 0.),
-                                digit: digit,
-                                is_over: false,
-                                is_touch: false,
-                            })];
+                            return vec![Event::FingerUp(FingerUpEvent{
+                                modifiers:KeyModifiers{..Default::default()},
+                                abs:self.platform.last_mouse_pos,
+                                rel:self.platform.last_mouse_pos,
+                                rect:Rect::zero(),
+                                abs_start:Vec2::zero(),
+                                rel_start:Vec2::zero(),
+                                digit:digit,
+                                is_over:false,
+                                is_touch:false,
+                                time:0.0
+                            })]
                         }
                     }
                 }
@@ -384,8 +405,8 @@ impl Cx {
                     let old_dpi_factor = self.target_dpi_factor as f32;
                     let old_size = self.target_size.clone();
                     self.target_dpi_factor = dpi_factor as f32;
-                    self.target_size = vec2(logical_size.width as f32, logical_size.height as f32);
-                    return vec![Event::Resized(ResizedEvent {
+                    self.target_size = Vec2{x:logical_size.width as f32, y:logical_size.height as f32};
+                    return vec![Event::Resized(ResizedEvent{
                         old_size: old_size,
                         old_dpi_factor: old_dpi_factor,
                         new_size: self.target_size.clone(),
@@ -399,6 +420,12 @@ impl Cx {
         vec![Event::None]
     }
 
+    pub fn show_text_ime(&mut self, _x:f32, _y:f32){
+    }
+
+    pub fn hide_text_ime(&mut self){
+        //self.platform.from_wasm.hide_text_ime();
+    }
 
     pub fn compile_all_ogl_shaders(&mut self) {
         for sh in &self.shaders {
@@ -595,16 +622,19 @@ impl Cx {
 
     pub fn set_uniform_buffer_fallback(locs: &Vec<GLUniform>, uni: &Vec<f32>) {
         let mut o = 0;
-        for loc in locs {
-            if loc.loc >= 0 {
-                unsafe {
-                    match loc.size {
-                        1 => gl::Uniform1f(loc.loc, uni[o]),
-                        2 => gl::Uniform2f(loc.loc, uni[o], uni[o + 1]),
-                        3 => gl::Uniform3f(loc.loc, uni[o], uni[o + 1], uni[o + 2]),
-                        4 => gl::Uniform4f(loc.loc, uni[o], uni[o + 1], uni[o + 2], uni[o + 3]),
-                        16 => gl::UniformMatrix4fv(loc.loc, 1, 0, uni.as_ptr().offset((o) as isize)),
-                        _ => ()
+        for loc in locs{
+            if o + loc.size > uni.len(){
+                return
+            }
+            if loc.loc >=0 {
+                unsafe{
+                    match loc.size{
+                        1=>gl::Uniform1f(loc.loc, uni[o]),
+                        2=>gl::Uniform2f(loc.loc, uni[o], uni[o+1]),
+                        3=>gl::Uniform3f(loc.loc, uni[o], uni[o+1], uni[o+2]),
+                        4=>gl::Uniform4f(loc.loc, uni[o], uni[o+1], uni[o+2], uni[o+3]),
+                        16=>gl::UniformMatrix4fv(loc.loc, 1, 0, uni.as_ptr().offset((o) as isize)),
+                        _=>()
                     }
                 }
             };

@@ -76,7 +76,7 @@ pub enum TabEvent{
 
 impl Tab{
 
-    pub fn get_bg_color(&self, cx:&Cx)->Vec4{
+    pub fn get_bg_color(&self, cx:&Cx)->Color{
         if self._is_selected{
             cx.color("bg_selected")
         } 
@@ -85,7 +85,7 @@ impl Tab{
         }
     }
 
-    pub fn get_text_color(&self, cx:&Cx)->Vec4{
+    pub fn get_text_color(&self, cx:&Cx)->Color{
         if self._is_selected{
             if self._is_focussed{
                 cx.color("text_selected_focus")
@@ -106,28 +106,28 @@ impl Tab{
 
     pub fn anim_default(&self, cx:&Cx)->Anim{
         Anim::new(Play::Cut{duration:0.05}, vec![
-            Track::vec4("bg.color", Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
-            Track::vec4("bg.border_color", Ease::Lin, vec![(1.0, cx.color("bg_selected"))]),
-            Track::vec4("text.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
-            Track::vec4("icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
+            Track::color("bg.color", Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
+            Track::color("bg.border_color", Ease::Lin, vec![(1.0, cx.color("bg_selected"))]),
+            Track::color("text.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
+            Track::color("icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
         ])
     }
 
     pub fn anim_over(&self, cx:&Cx)->Anim{
         Anim::new(Play::Cut{duration:0.01}, vec![
-            Track::vec4("bg.color", Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
-            Track::vec4("bg.border_color", Ease::Lin, vec![(1.0, cx.color("bg_selected"))]),
-            Track::vec4("text.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
-            Track::vec4("icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
+            Track::color("bg.color", Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
+            Track::color("bg.border_color", Ease::Lin, vec![(1.0, cx.color("bg_selected"))]),
+            Track::color("text.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
+            Track::color("icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
         ])
     }
 
     pub fn anim_down(&self, cx:&Cx)->Anim{
         Anim::new(Play::Cut{duration:0.01}, vec![
-            Track::vec4("bg.color", Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
-            Track::vec4("bg.border_color", Ease::Lin, vec![(1.0, cx.color("bg_selected"))]),
-            Track::vec4("text.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
-            Track::vec4("icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])            
+            Track::color("bg.color", Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
+            Track::color("bg.border_color", Ease::Lin, vec![(1.0, cx.color("bg_selected"))]),
+            Track::color("text.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
+            Track::color("icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])            
         ])
     }
 
@@ -183,7 +183,7 @@ impl Tab{
         if !self.animator.term_anim_playing(){
             match self.tab_close.handle_tab_close(cx, event){
                 TabCloseEvent::Clicked=>{
-                    self._close_anim_rect = self._bg_area.get_rect(cx);
+                    self._close_anim_rect = self._bg_area.get_rect_scrolled(cx);
                     self.animator.play_anim(cx, self.anim_close(cx));
                     return TabEvent::Closing;
                 },
@@ -275,13 +275,13 @@ impl Tab{
    }
 
     pub fn get_tab_rect(&mut self, cx:&Cx)->Rect{
-        self._bg_area.get_rect(cx)
+        self._bg_area.get_rect_scrolled(cx)
     }
 
     pub fn draw_tab(&mut self, cx:&mut Cx){
         // pull the bg color from our animation system, uses 'default' value otherwise
 
-        self.bg.color = self.animator.last_vec4("bg.color");
+        self.bg.color = self.animator.last_color("bg.color");
 
         // check if we are closing
         if self.animator.term_anim_playing(){
@@ -291,22 +291,26 @@ impl Tab{
                 Bounds::Fix(self._close_anim_rect.h),
                 Margin::zero(),
             );
-            bg_inst.push_vec4(cx, self.animator.last_vec4("bg.border_color"));
-            self._bg_area = bg_inst.get_area();            
+            bg_inst.push_color(cx, self.animator.last_color("bg.border_color"));
+            self._bg_area = bg_inst.into_area();            
         }
         else{
             let bg_inst = self.bg.begin_quad(cx, &self.bg_layout);
-            bg_inst.push_vec4(cx, self.animator.last_vec4("bg.border_color"));
+            bg_inst.push_color(cx, self.animator.last_color("bg.border_color"));
             if self.is_closeable{
                 self.tab_close.draw_tab_close(cx);
             }
+            else{
+                // take up the height of the close button for correct centering 
+                cx.walk_turtle(Bounds::Fix(0.0),Bounds::Fix(10.0),self.tab_close.margin,None);
+            }
             // push the 2 vars we added to bg shader
-            self.text.color = self.animator.last_vec4("text.color");
+            self.text.color = self.animator.last_color("text.color");
             self._text_area = self.text.draw_text(cx, &self.label);
 
             self._bg_area = self.bg.end_quad(cx, &bg_inst);
         }
-        self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
+        self.animator.update_area_refs(cx, self._bg_area); // if our area changed, update animation
     }
 
 }
